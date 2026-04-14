@@ -7,6 +7,7 @@
  * - Harmonogram 24h z resetem o 00:00 i wymuszonymi zerami o 00:05
  * - Wykres LIVE (przesuwny bufor 5 minut w RAM)
  * - Dynamiczny URL do Google Apps Script
+ * - Osobna wysyłka zegara (1Hz) i historii wykresu (co 5s)
  * ==================================================================== */
 
 #include <WiFi.h>
@@ -64,8 +65,7 @@ WiFiManager wm;
 float p_max_heater = 0.0;
 unsigned long last_control_loop = 0;
 unsigned long last_ws_update = 0;
-unsigned long last_live_update = 0;
-unsigned long last_wifi_check = 0; 
+unsigned long last_wifi_check = 0;
 unsigned long last_google_try = 0;
 unsigned long hw_reset_start = 0;
 
@@ -148,7 +148,7 @@ void aktualizujStanIKolory() {
 // =========================================================
 void syncWithGoogle() {
   if (WiFi.status() != WL_CONNECTED) return;
-  
+
   WiFiClientSecure client; 
   client.setInsecure(); 
   HTTPClient http;
@@ -180,9 +180,10 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
     
     if (doc.containsKey("mode")) tryb_auto = (doc["mode"] == "auto");
     if (doc.containsKey("pwm") && !tryb_auto) aktualne_pwm = ((int)doc["pwm"] * 1023) / 100;
-    
+
     if (doc.containsKey("cmd")) {
       String cmd = doc["cmd"];
+
       if (cmd == "reboot") { 
         delay(500); 
         ESP.restart();
@@ -210,8 +211,10 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
   }
 }
 
-void wyslijDaneWebsocket() {
+// Opcjonalny parametr decyduje czy załączyć dużą paczkę z wykresem Live
+void wyslijDaneWebsocket(bool sendLive = false) {
   JsonDocument doc;
+  
   doc["grid_p"] = (int)p_total; 
   doc["heater_pwm"] = (aktualne_pwm * 100) / 1023;
   doc["heater_active"] = (aktualne_pwm > 0); 
@@ -224,7 +227,7 @@ void wyslijDaneWebsocket() {
   doc["cloud_url"] = GOOGLE_SCRIPT_URL; 
   doc["cpu_temp"] = temperatureRead(); 
   doc["grid_hz"] = licznik_atm.GetFrequency(); 
-  doc["export_kwh"] = total_export_kwh; 
+  doc["export_kwh"] = total_export_kwh;
   doc["import_kwh"] = total_import_kwh;
   doc["date_start"] = formatTimestamp(start_timestamp); 
   doc["date_last"]  = formatTimestamp(last_timestamp);               
@@ -234,7 +237,9 @@ void wyslijDaneWebsocket() {
     char time_str[10];
     strftime(time_str, sizeof(time_str), "%H:%M:%S", &timeinfo); 
     doc["clock"] = String(time_str);
-  } else doc["clock"] = "Brak sync";
+  } else {
+    doc["clock"] = "Brak sync";
+  }
 
   JsonArray phases = doc.createNestedArray("phases");
   JsonObject l1 = phases.createNestedObject(); l1["v"] = licznik_atm.GetLineVoltageA(); l1["a"] = licznik_atm.GetLineCurrentA(); l1["p"] = licznik_atm.GetActivePowerA();
@@ -242,14 +247,16 @@ void wyslijDaneWebsocket() {
   JsonObject l3 = phases.createNestedObject(); l3["v"] = licznik_atm.GetLineVoltageC(); l3["a"] = licznik_atm.GetLineCurrentC(); l3["p"] = licznik_atm.GetActivePowerC();
   
   JsonObject dips = doc.createNestedObject("dips");
-  dips["1"] = (digitalRead(PIN_DIP1) == LOW); 
+  dips["1"] = (digitalRead(PIN_DIP1) == LOW);
   dips["2"] = (digitalRead(PIN_DIP2) == LOW);
   dips["3"] = (digitalRead(PIN_DIP3) == LOW);
   dips["4"] = (digitalRead(PIN_DIP4) == LOW);
 
-  JsonArray live = doc.createNestedArray("live_data");
-  for(int i=0; i<60; i++) {
-    live.add((int)live_history[i]);
+  if (sendLive) {
+    JsonArray live = doc.createNestedArray("live_data");
+    for(int i=0; i<60; i++) {
+      live.add((int)live_history[i]);
+    }
   }
 
   String jsonString; 
@@ -268,17 +275,16 @@ void setup() {
   Serial.println("        START SYSTEMU MSAG v1.16 PRO");
   Serial.println("===============================================");
   
-  // Czyszczenie tablicy LIVE
   for(int i=0; i<60; i++) live_history[i] = 0;
 
-  // --- PINY RESETU ---
-  pinMode(PIN_RST_OUT, OUTPUT); digitalWrite(PIN_RST_OUT, LOW); 
+  pinMode(PIN_RST_OUT, OUTPUT);
+  digitalWrite(PIN_RST_OUT, LOW); 
   pinMode(PIN_RST_IN, INPUT_PULLUP); 
   
   nvm.begin("msag", false);
   total_export_kwh = nvm.getDouble("exp_kwh", 0.0);
   total_import_kwh = nvm.getDouble("imp_kwh", 0.0);
-  start_timestamp  = nvm.getUInt("time_start", 0); 
+  start_timestamp  = nvm.getUInt("time_start", 0);
   last_timestamp   = nvm.getUInt("time_last", 0);
   
   pinMode(PIN_LED1, OUTPUT); 
@@ -299,19 +305,20 @@ void setup() {
   rgb_led.show();
 
   SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SPI_CS);
-  pinMode(PIN_SPI_CS, OUTPUT); digitalWrite(PIN_SPI_CS, LOW);
+  pinMode(PIN_SPI_CS, OUTPUT);
+  digitalWrite(PIN_SPI_CS, LOW);
   SPI.transfer16(0x0070); SPI.transfer16(0x789A); digitalWrite(PIN_SPI_CS, HIGH);
   delay(100);
   licznik_atm.begin(PIN_SPI_CS, 50, 0, 8000, 8000, 8000, 8000);
   
   if(!LittleFS.begin(true)) Serial.println("[BŁĄD] LittleFS");
-
+  
   // =========================================================
   // NIEBLOKUJĄCY WIFI MANAGER
   // =========================================================
   WiFi.mode(WIFI_STA);
   wm.setHostname(HOSTNAME);
-  wm.setConfigPortalBlocking(false); 
+  wm.setConfigPortalBlocking(false);
   
   if(WiFi.SSID() == "") {
       Serial.println("\n[WIFI] Brak hasła w pamięci! Uruchamiam Portal Konfiguracyjny (NON-BLOCKING).");
@@ -322,13 +329,13 @@ void setup() {
 
   if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
   configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
-
+  
   // --- URUCHOMIENIE GŁÓWNEGO SERWERA MSAG ---
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
   server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
   ElegantOTA.begin(&server); 
-  server.begin(); 
+  server.begin();
 }
 
 // =========================================================
@@ -352,7 +359,7 @@ void loop() {
           ESP.restart();
       }
   } else {
-      hw_reset_start = 0; 
+      hw_reset_start = 0;
   }
 
   // --- CICHY RECONNECT ---
@@ -377,7 +384,7 @@ void loop() {
 
     if (tryb_auto && !tryb_awaryjny) {
       if (ema_p_total > -50) {
-        aktualne_pwm -= 40; 
+        aktualne_pwm -= 40;
       } 
       else if (ema_p_total < -100) {
         aktualne_pwm += 20;
@@ -389,11 +396,11 @@ void loop() {
 
     if (tryb_awaryjny) aktualne_pwm = 0;
     ledcWrite(PIN_PWM_OUT, aktualne_pwm);
-    aktualizujStanIKolory(); 
+    aktualizujStanIKolory();
   }
 
   // ====================================================================
-  // 2. LICZNIKI ENERGII I ZEGAR 24H (1 Hz)
+  // 2. LICZNIKI ENERGII, ZEGAR 1Hz ORAZ LOGIKA WYSYŁKI WYKRESU LIVE
   // ====================================================================
   if (millis() - last_ws_update >= 1000) {
     last_ws_update = millis();
@@ -409,16 +416,15 @@ void loop() {
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
       int obecna_godzina = timeinfo.tm_hour; 
-      int obecna_minuta  = timeinfo.tm_min; 
+      int obecna_minuta  = timeinfo.tm_min;
       
       if (timeinfo.tm_year > 123) {
         static int last_action_minute = -1;
-        
         if (obecna_minuta != last_action_minute) {
           last_action_minute = obecna_minuta;
           
           if (obecna_godzina == 0 && obecna_minuta == 0) {
-            today_export_kwh = 0.0; 
+            today_export_kwh = 0.0;
             today_import_kwh = 0.0;
           }
           else if (obecna_godzina == 0 && obecna_minuta == 5) {
@@ -436,7 +442,28 @@ void loop() {
         }
       }
     }
-    digitalWrite(PIN_LED1, !digitalRead(PIN_LED1)); 
+
+    // Logika przesuwania bufora dla wykresu co 5 sekund
+    static int live_tick_counter = 0;
+    live_tick_counter++;
+    bool send_live_now = false;
+    
+    if (live_tick_counter >= 5) {
+        live_tick_counter = 0;
+        for(int i = 0; i < 59; i++) {
+            live_history[i] = live_history[i+1];
+        }
+        live_history[59] = ema_p_total;
+        send_live_now = true;
+    }
+
+    // Wysyłamy paczkę do strony WWW. Zegar odświeża się tu co 1 sekundę. 
+    // Co 5 sekund dołączana jest dodatkowo paczka "live_data".
+    if(WiFi.status() == WL_CONNECTED) {
+      wyslijDaneWebsocket(send_live_now);
+    }
+    
+    digitalWrite(PIN_LED1, !digitalRead(PIN_LED1));
   }
 
   // ====================================================================
@@ -446,23 +473,6 @@ void loop() {
     last_google_try = millis();
     if (trigger_google_sync && WiFi.status() == WL_CONNECTED) {
       syncWithGoogle();
-    }
-  }
-
-  // ====================================================================
-  // 4. BUFOR LIVE I WYSYŁKA WEBSOCKET (Co 5 sekund)
-  // ====================================================================
-  if (millis() - last_live_update >= 5000) {
-    last_live_update = millis();
-    
-    // Przesunięcie bufora (najstarsze spadają, nowe wchodzi na koniec)
-    for(int i = 0; i < 59; i++) {
-        live_history[i] = live_history[i+1];
-    }
-    live_history[59] = ema_p_total;
-    
-    if(WiFi.status() == WL_CONNECTED) {
-      wyslijDaneWebsocket();
     }
   }
 }

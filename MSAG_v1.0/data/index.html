@@ -143,7 +143,13 @@
             </div>
 
             <div style="width: 100%; margin-top: 30px;">
-                <h3 style="font-size: 0.9rem; color: var(--text-dim); margin-bottom: 10px; text-transform: uppercase;">Balans Mocy (Ostatnie 5 min)</h3>
+                <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 10px;">
+                    <h3 style="font-size: 0.9rem; color: var(--text-dim); text-transform: uppercase;">Balans Mocy (Ostatnie 5 min)</h3>
+                    <div style="display:flex; gap: 10px; font-size: 0.7rem;">
+                        <span style="color: var(--accent-green);">■ Eksport</span>
+                        <span style="color: var(--accent-red);">■ Pobór</span>
+                    </div>
+                </div>
                 <div class="live-chart-container"><canvas id="liveChart"></canvas></div>
             </div>
         </div>
@@ -191,7 +197,6 @@
     </footer>
 
     <script>
-        // URL POBIERANY DYNAMICZNIE Z ESP32
         let google_script_url = "";
 
         function switchTab(tabId) {
@@ -216,19 +221,42 @@
         }
         function sendCommand(cmd) { if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(JSON.stringify(cmd)); }
 
+        // ========================================================
+        // NOWY ALGORYTM WYKRESU LIVE
+        // ========================================================
         function renderLiveChart(points) {
+            // Obracamy tablicę o 180 stopni - tak aby najnowsze (Teraz) było po LEWEJ stronie wykresu.
+            const chartData = points.slice().reverse(); 
+            
+            // Generujemy etykiety osi X (0 to Teraz, 6 to -30s, itd.)
+            const labels = Array.from({length: 60}, (_, i) => {
+                let seconds = i * 5;
+                if (seconds === 0) return "Teraz";
+                let m = Math.floor(seconds / 60);
+                let s = seconds % 60;
+                if (m > 0 && s > 0) return `-${m}m ${s}s`;
+                if (m > 0 && s === 0) return `-${m}m`;
+                return `-${s}s`;
+            });
+
             const ctx = document.getElementById('liveChart').getContext('2d');
             if (!frontendLiveChart) {
                 frontendLiveChart = new Chart(ctx, {
                     type: 'line',
                     data: {
-                        labels: Array.from({length: 60}, (_, i) => "-" + (60 - i - 1) * 5 + "s"),
+                        labels: labels,
                         datasets: [{
-                            label: 'Eksport / Pobór (W)',
-                            data: points,
-                            borderColor: '#3b82f6',
-                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                            fill: true,
+                            label: 'Balans Mocy (W)',
+                            data: chartData,
+                            segment: {
+                                // Zielony dla eksportu (wartości < 0), Czerwony dla poboru (wartości > 0)
+                                borderColor: ctx => ctx.p0.parsed.y < 0 ? '#10b981' : '#ef4444'
+                            },
+                            fill: {
+                                target: 'origin',
+                                above: 'rgba(239, 68, 68, 0.25)', // Import (Czerwone Tło)
+                                below: 'rgba(16, 185, 129, 0.25)' // Eksport (Zielone Tło)
+                            },
                             tension: 0.4,
                             pointRadius: 0
                         }]
@@ -238,14 +266,31 @@
                         maintainAspectRatio: false,
                         animation: false,
                         scales: { 
-                            y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8' } },
-                            x: { ticks: { display: false } }
+                            y: { 
+                                grid: { 
+                                    // Linia zerowa jest pogrubiona i rozjaśniona dla czytelności
+                                    color: (ctx) => ctx.tick.value === 0 ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,0.05)',
+                                    lineWidth: (ctx) => ctx.tick.value === 0 ? 2 : 1
+                                }, 
+                                ticks: { color: '#94a3b8' } 
+                            },
+                            x: { 
+                                ticks: { 
+                                    color: '#94a3b8',
+                                    maxRotation: 0,
+                                    // Etykieta wyświetla się tylko co 6 element (6 * 5s = 30 sekund)
+                                    callback: function(val, index) {
+                                        return index % 6 === 0 ? this.getLabelForValue(val) : '';
+                                    }
+                                },
+                                grid: { display: false }
+                            }
                         },
-                        plugins: { legend: { display: false } }
+                        plugins: { legend: { display: false }, tooltip: { intersect: false, mode: 'index' } }
                     }
                 });
             } else {
-                frontendLiveChart.data.datasets[0].data = points;
+                frontendLiveChart.data.datasets[0].data = chartData;
                 frontendLiveChart.update();
             }
         }
@@ -253,6 +298,8 @@
         function updateUI() {
             if (data.fw_version) document.getElementById('fw-version').innerText = data.fw_version;
             if (data.cloud_url) google_script_url = data.cloud_url;
+            
+            // Zegar aktualizuje się co sekundę, wykres tylko jak ma pakiet live_data
             if (data.live_data) renderLiveChart(data.live_data);
 
             document.getElementById('clock').innerText = data.clock;
@@ -277,7 +324,6 @@
             const fPv = document.getElementById('flow-pv'); 
             const fHeater = document.getElementById('flow-heater');
             
-            // Logika linii SIEĆ
             if (Math.abs(data.grid_p) > 10) { 
                 fGrid.style.opacity = "1"; 
                 fGrid.style.stroke = data.grid_p < 0 ? "var(--accent-green)" : "var(--accent-red)"; 
@@ -286,7 +332,6 @@
                 fGrid.style.opacity = "0"; 
             }
             
-            // Logika linii PV (Przywrócona)
             if (data.grid_p < -50 || data.heater_active) { 
                 fPv.style.opacity = "1"; 
                 fPv.style.stroke = "var(--accent-green)"; 
@@ -294,7 +339,6 @@
                 fPv.style.opacity = "0"; 
             }
             
-            // Logika linii GRZAŁKA
             if (data.heater_active) { 
                 fHeater.style.opacity = "1"; 
                 fHeater.style.stroke = "var(--accent-orange)"; 
