@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MSAG v1.0 | Wiktor Nycek</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --accent-green: #10b981;
+            --accent-red: #ef4444;
+            --accent-blue: #3b82f6;
+            --accent-orange: #f59e0b;
+            --accent-purple: #8b5cf6;
+            --text-main: #f8fafc;
+            --text-dim: #94a3b8;
+            --border: rgba(255, 255, 255, 0.1);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-color);
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.05) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(16, 185, 129, 0.05) 0%, transparent 40%);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            position: relative;
+        }
+
+        header { width: 100%; max-width: 1000px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 0 10px; }
+        .logo { font-size: 1.5rem; font-weight: 800; letter-spacing: -1px; background: linear-gradient(to right, #3b82f6, #10b981); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        
+        .header-right { display: flex; align-items: center; gap: 15px; }
+        .conn-status { display: flex; align-items: center; gap: 8px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; padding: 6px 12px; background: rgba(0,0,0,0.3); border-radius: 99px; border: 1px solid var(--border); }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-red); box-shadow: 0 0 8px var(--accent-red); transition: all 0.3s; }
+        .online .status-dot { background: var(--accent-green); box-shadow: 0 0 8px var(--accent-green); }
+
+        .tabs { display: flex; gap: 10px; }
+        .tab-btn { padding: 8px 16px; background: rgba(255,255,255,0.05); border: 1px solid var(--border); border-radius: 8px; color: var(--text-dim); font-weight: 600; cursor: pointer; transition: 0.3s; }
+        .tab-btn.active { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); border-color: var(--accent-blue); }
+
+        .tab-content { display: none; width: 100%; max-width: 1000px; }
+        #tab-dashboard.active { display: grid; grid-template-columns: 1fr; gap: 20px; }
+        #tab-stats.active { display: block; }
+        
+        @media (min-width: 768px) {
+            #tab-dashboard.active { grid-template-columns: 3fr 2fr; }
+        }
+
+        .card { background: var(--card-bg); backdrop-filter: blur(10px); border: 1px solid var(--border); border-radius: 24px; padding: 24px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
+        
+        /* DIAGRAM */
+        .diagram-card { overflow: visible; display: flex; flex-direction: column; align-items: center; }
+        .flow-svg { width: 100%; height: auto; max-width: 600px; }
+        .node-label { font-size: 10px; fill: var(--text-dim); font-weight: 600; text-transform: uppercase; }
+        .node-value { font-size: 12px; fill: var(--text-main); font-weight: 800; font-family: 'JetBrains Mono', monospace; }
+        .line-bg { fill: none; stroke: #1e293b; stroke-width: 3; stroke-linecap: round; }
+        .line-flow { fill: none; stroke-width: 3; stroke-linecap: round; stroke-dasharray: 8 12; animation: flow 2s linear infinite; opacity: 0; transition: opacity 0.5s; }
+        @keyframes flow { from { stroke-dashoffset: 40; } to { stroke-dashoffset: 0; } }
+        .flow-reverse { animation-direction: reverse; }
+        @keyframes pulse-orange { 0% { filter: drop-shadow(0 0 2px rgba(245, 158, 11, 0.4)); } 50% { filter: drop-shadow(0 0 12px rgba(245, 158, 11, 0.7)); } 100% { filter: drop-shadow(0 0 2px rgba(245, 158, 11, 0.4)); } }
+        .heater-active-anim { animation: pulse-orange 2s infinite ease-in-out; }
+
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; width: 100%; }
+        .stat-box { background: rgba(15, 23, 42, 0.5); padding: 12px; border-radius: 16px; text-align: center; border: 1px solid var(--border); }
+        .stat-label { font-size: 0.7rem; color: var(--text-dim); margin-bottom: 4px; display: block; }
+        .stat-val { font-size: 1rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+
+        .control-panel { display: flex; flex-direction: column; gap: 20px; }
+        .badge { padding: 4px 10px; border-radius: 99px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; }
+        .badge-auto { background: rgba(16, 185, 129, 0.2); color: var(--accent-green); }
+        .badge-manual { background: rgba(245, 158, 11, 0.2); color: var(--accent-orange); }
+
+        .slider-container { margin: 20px 0; }
+        input[type=range] { width: 100%; accent-color: var(--accent-orange); cursor: pointer; }
+        .toggle-btn { background: #1e293b; border: none; color: white; padding: 10px 20px; border-radius: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; border: 1px solid var(--border); }
+        .toggle-btn.active { background: var(--accent-blue); box-shadow: 0 0 15px rgba(59, 130, 246, 0.4); }
+        .danger-btn { background: rgba(239, 68, 68, 0.1); border: 1px solid var(--accent-red); color: var(--accent-red); }
+
+        .phase-row { display: grid; grid-template-columns: 40px 1fr 1fr 1fr; padding: 10px 0; border-bottom: 1px solid var(--border); align-items: center; }
+        .p-label { font-weight: 800; color: var(--accent-blue); }
+        .p-val { text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
+
+        .dip-row { display: flex; gap: 10px; margin-top: 10px; }
+        .dip { width: 24px; height: 36px; background: #334155; border-radius: 4px; position: relative; border: 1px solid #000; }
+        .dip::after { content: ''; position: absolute; width: 16px; height: 12px; background: #f8fafc; left: 3px; bottom: 4px; border-radius: 2px; transition: all 0.2s; }
+        .dip.on { background: var(--accent-blue); }
+        .dip.on::after { bottom: 18px; }
+        .dip-label { font-size: 0.6rem; color: var(--text-dim); text-align: center; margin-top: 4px; }
+
+        /* WIDOK STATYSTYK */
+        .stats-toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 16px; border: 1px solid var(--border);}
+        .stats-toolbar select { padding: 10px; background: #1e293b; color: white; border: 1px solid var(--border); border-radius: 8px; outline: none; cursor: pointer;}
+        .cloud-btn { padding: 10px 20px; background: rgba(16, 185, 129, 0.1); border: 1px solid var(--accent-green); color: var(--accent-green); font-weight: bold; border-radius: 8px; cursor: pointer; transition: 0.3s; }
+        .chart-container { width: 100%; height: 500px; position: relative; } 
+
+        /* STOPKA Z PODPISEM */
+        footer { margin-top: 40px; padding-bottom: 20px; font-size: 0.75rem; color: var(--text-dim); width: 100%; max-width: 1000px; display: flex; justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 10px; }
+        .author-tag { background: rgba(59, 130, 246, 0.1); color: var(--accent-blue); padding: 4px 10px; border-radius: 6px; font-weight: 700; letter-spacing: 0.5px; border: 1px solid rgba(59, 130, 246, 0.2); }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo">MSAG <span id="fw-version" style="font-size: 0.8rem; color: var(--text-dim);">v1.05</span></div>
+        <div class="header-right">
+            <div class="tabs">
+                <button class="tab-btn active" onclick="switchTab('dashboard')">Panel</button>
+                <button class="tab-btn" onclick="switchTab('stats')">Statystyki</button>
+            </div>
+            <div id="conn-indicator" class="conn-status">
+                <div class="status-dot"></div>
+                <span id="conn-text">OFFLINE</span>
+            </div>
+        </div>
+    </header>
+
+    <div id="tab-dashboard" class="tab-content active">
+        <div class="card diagram-card">
+            <svg viewBox="0 0 400 300" class="flow-svg">
+                <path d="M200 60 L200 130" class="line-bg" />
+                <path d="M70 200 L160 200" class="line-bg" />
+                <path d="M240 200 L330 200" class="line-bg" />
+                <path id="flow-grid"   d="M200 60 L200 130" class="line-flow" />
+                <path id="flow-pv"     d="M70 200 L160 200" class="line-flow" />
+                <path id="flow-heater" d="M240 200 L330 200" class="line-flow" />
+                <g transform="translate(170, 0)"><rect width="60" height="60" rx="12" fill="rgba(30,41,59,0.8)" /><text x="30" y="35" text-anchor="middle" fill="white" font-size="24">⚡</text><text x="30" y="75" text-anchor="middle" class="node-label">SIEĆ</text></g>
+                <g transform="translate(10, 170)"><rect width="60" height="60" rx="12" fill="rgba(16,185,129,0.1)" /><text x="30" y="35" text-anchor="middle" fill="white" font-size="24">☀️</text><text x="30" y="75" text-anchor="middle" class="node-label">PV</text></g>
+                <g transform="translate(170, 150)"><rect width="60" height="60" rx="12" fill="rgba(59,130,246,0.1)" /><text x="30" y="35" text-anchor="middle" fill="white" font-size="24">🏠</text><text x="30" y="75" text-anchor="middle" class="node-label">DOM</text><text id="val-total" x="30" y="95" text-anchor="middle" class="node-value"></text></g>
+                <g id="heater-node" transform="translate(330, 170)"><rect id="heater-bg" width="60" height="60" rx="12" fill="rgba(245,158,11,0.1)" /><text x="30" y="35" text-anchor="middle" fill="white" font-size="24">🔥</text><circle id="heater-status-led" cx="52" cy="8" r="4" fill="#ef4444" /><text x="30" y="75" text-anchor="middle" class="node-label">GRZAŁKA</text><text id="val-heater" x="30" y="95" text-anchor="middle" class="node-value">0%</text></g>
+            </svg>
+            <div class="stats-grid">
+                <div class="stat-box"><span class="stat-label">Eksport</span><span id="stat-export-w" class="stat-val" style="color:var(--accent-green)">--- W</span></div>
+                <div class="stat-box"><span class="stat-label">Pobór</span><span id="stat-import-w" class="stat-val" style="color:var(--accent-red)">--- W</span></div>
+            </div>
+        </div>
+
+        <div class="control-panel">
+            <div class="card">
+                <div class="heater-header"><h3 style="font-size: 1.1rem;">Grzałka</h3><span id="mode-badge" class="badge badge-auto">Auto</span></div>
+                <div class="slider-container"><div style="display:flex; justify-content: space-between; margin-bottom: 8px;"><span class="stat-label">Moc</span><span id="slider-val" style="color:var(--accent-orange); font-weight:700;">0%</span></div><input type="range" id="heater-slider" min="0" max="100" value="0" disabled></div>
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px;"><button id="btn-auto" class="toggle-btn active">Auto</button><button id="btn-man" class="toggle-btn">Manual</button></div>
+            </div>
+            <div class="card phase-card">
+                <h3 style="font-size: 1rem; margin-bottom: 10px;">Fazy</h3>
+                <div class="phase-row" style="opacity: 0.5; font-size: 0.7rem; border-bottom: 1px solid var(--border);"><div>FAZA</div><div style="text-align:right;">V</div><div style="text-align:right;">A</div><div style="text-align:right;">W</div></div>
+                <div class="phase-row"><div class="p-label">L1</div><div id="l1-v" class="p-val">-- V</div><div id="l1-a" class="p-val">-- A</div><div id="l1-w" class="p-val">-- W</div></div>
+                <div class="phase-row"><div class="p-label" style="color:var(--accent-green);">L2</div><div id="l2-v" class="p-val">-- V</div><div id="l2-a" class="p-val">-- A</div><div id="l2-w" class="p-val">-- W</div></div>
+                <div class="phase-row"><div class="p-label" style="color:var(--accent-red);">L3</div><div id="l3-v" class="p-val">-- V</div><div id="l3-a" class="p-val">-- A</div><div id="l3-w" class="p-val">-- W</div></div>
+                <div style="margin-top:15px; font-size:0.7rem; color:var(--text-dim); display:flex; justify-content:space-between;"><span>Zegar: <span id="clock" style="color:var(--text-main);">--:--:--</span></span><span>Temp: <span id="cpu-temp" style="color:var(--text-main);">-- °C</span></span></div>
+            </div>
+            <div class="card hw-status">
+                <div style="display:flex; justify-content: space-between; align-items: center;"><h3 style="font-size: 1rem;">Admin</h3><div id="led-rgb" style="width:12px; height:12px; border-radius:50%; background: #3b82f6;"></div></div>
+                <div style="margin-top:15px; display:flex; justify-content:space-between;"><span class="stat-label">DIP Power:</span><span id="dip-power-val" style="color:var(--accent-blue); font-weight:700;">0.0 kW</span></div>
+                <div class="dip-row"><div><div id="dip1" class="dip"></div><div class="dip-label">4k</div></div><div><div id="dip2" class="dip"></div><div class="dip-label">2k</div></div><div><div id="dip3" class="dip"></div><div class="dip-label">1k</div></div><div><div id="dip4" class="dip"></div><div class="dip-label">0.5</div></div></div>
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px;"><button id="btn-reboot" class="toggle-btn danger-btn" style="font-size: 0.8rem;">Restart</button><button id="btn-reset-kwh" class="toggle-btn danger-btn" style="font-size: 0.8rem;">Reset Licznika</button></div>
+                <div class="admin-links" style="margin-top:15px; font-size:0.7rem; display:flex; justify-content:space-between;"><a href="/update" target="_blank">OTA Update</a><span id="uptime">--:--:--</span></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="tab-stats" class="tab-content">
+        <div class="card">
+            <h2 style="margin-bottom: 15px;">Statystyki Historyczne</h2>
+            <div class="stats-toolbar">
+                <button class="cloud-btn" onclick="fetchCloudData()" id="btn-fetch-cloud">☁️ Pobierz z Chmury</button>
+                <select id="sel-year" onchange="updateFilters('year')"><option value="">Rok</option></select>
+                <select id="sel-month" onchange="updateFilters('month')"><option value="">Miesiąc</option></select>
+                <select id="sel-day" onchange="updateFilters('day')"><option value="">Dzień</option></select>
+                <div id="cloud-status" style="margin-top: 10px; font-size: 0.8rem; width: 100%; color: var(--accent-orange);">Gotowy.</div>
+            </div>
+            <div class="chart-container"><canvas id="cloudChart"></canvas></div>
+        </div>
+    </div>
+
+    <footer>
+        <div>Projekt i wykonanie: <span class="author-tag">Wiktor Nycek</span></div>
+    </footer>
+
+    <script>
+        // WPISZ TU SWÓJ LINK DO SKRYPTU GOOGLE
+        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzAcy2naRZOLIXcWL7EJqcBJneJ2xo41oJqKFPly6qPAq5zUFtkmoKOWeUMx3GuR9Fz/exec";
+
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('tab-' + tabId).classList.add('active');
+        }
+
+        let data = { grid_p: 0, heater_pwm: 0, heater_active: false, ssr_v: 0, phases: [{v:0, a:0, p:0}, {v:0, a:0, p:0}, {v:0, a:0, p:0}], dips: { 1: false, 2: false, 3: false, 4: false }, mode: 'auto', uptime: '00:00:00', sys_color: 'blue', clock: '--', grid_hz: 0, cpu_temp: 0 };
+        let websocket;
+
+        function initWebSocket() {
+            websocket = new WebSocket(`ws://${window.location.hostname}/ws`);
+            websocket.onopen = () => { document.getElementById('conn-indicator').classList.add('online'); document.getElementById('conn-text').innerText = 'ONLINE'; };
+            websocket.onclose = () => { document.getElementById('conn-indicator').classList.remove('online'); document.getElementById('conn-text').innerText = 'OFFLINE'; setTimeout(initWebSocket, 2000); };
+            websocket.onmessage = (event) => { Object.assign(data, JSON.parse(event.data)); updateUI(); };
+        }
+        function sendCommand(cmd) { if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(JSON.stringify(cmd)); }
+
+        function updateUI() {
+            document.getElementById('clock').innerText = data.clock;
+            document.getElementById('cpu-temp').innerText = data.cpu_temp.toFixed(1);
+            document.getElementById('val-heater').textContent = data.heater_pwm + "%";
+            document.getElementById('slider-val').innerText = data.heater_pwm + "%";
+            document.getElementById('uptime').innerText = data.uptime;
+            
+            const valTotal = document.getElementById('val-total');
+            if (data.grid_p > 0) { valTotal.textContent = "POBÓR " + data.grid_p + "W"; valTotal.style.fill = "var(--accent-red)"; } 
+            else if (data.grid_p < 0) { valTotal.textContent = "EXPORT " + Math.abs(data.grid_p) + "W"; valTotal.style.fill = "var(--accent-green)"; } 
+            else { valTotal.textContent = "BALANS 0W"; valTotal.style.fill = "var(--accent-blue)"; }
+
+            document.getElementById('stat-export-w').innerText = (data.grid_p < 0 ? Math.abs(data.grid_p) : 0) + " W";
+            document.getElementById('stat-import-w').innerText = (data.grid_p > 0 ? data.grid_p : 0) + " W";
+
+            const ledH = document.getElementById('heater-status-led');
+            if (data.heater_active) { ledH.style.fill = "var(--accent-green)"; document.getElementById('heater-node').classList.add('heater-active-anim'); } 
+            else { ledH.style.fill = "var(--accent-red)"; document.getElementById('heater-node').classList.remove('heater-active-anim'); }
+
+            const fGrid = document.getElementById('flow-grid'); const fPv = document.getElementById('flow-pv'); const fHeater = document.getElementById('flow-heater');
+            if (Math.abs(data.grid_p) > 10) { fGrid.style.opacity = "1"; fGrid.style.stroke = data.grid_p < 0 ? "var(--accent-green)" : "var(--accent-red)"; data.grid_p < 0 ? fGrid.classList.add('flow-reverse') : fGrid.classList.remove('flow-reverse'); } else fGrid.style.opacity = "0";
+            if (data.grid_p < -50 || data.heater_active) { fPv.style.opacity = "1"; fPv.style.stroke = "var(--accent-green)"; } else fPv.style.opacity = "0";
+            if (data.heater_active) { fHeater.style.opacity = "1"; fHeater.style.stroke = "var(--accent-orange)"; } else fHeater.style.opacity = "0";
+
+            document.getElementById('led-rgb').style.background = `var(--accent-${data.sys_color})`;
+            let dipSum = 0; [4, 2, 1, 0.5].forEach((w, i) => { if(data.dips[(i+1).toString()]) { document.getElementById('dip'+(i+1)).classList.add('on'); dipSum += w; } else document.getElementById('dip'+(i+1)).classList.remove('on'); });
+            document.getElementById('dip-power-val').innerText = dipSum.toFixed(1) + " kW";
+
+            data.phases.forEach((p, i) => { document.getElementById(`l${i+1}-v`).innerText = p.v.toFixed(1); document.getElementById(`l${i+1}-a`).innerText = p.a.toFixed(2); document.getElementById(`l${i+1}-w`).innerText = p.p; });
+
+            const slider = document.getElementById('heater-slider');
+            if (data.mode === 'auto') { document.getElementById('btn-auto').classList.add('active'); document.getElementById('btn-man').classList.remove('active'); slider.disabled = true; document.getElementById('mode-badge').innerText = "Auto"; } 
+            else { document.getElementById('btn-man').classList.add('active'); document.getElementById('btn-auto').classList.remove('active'); slider.disabled = false; document.getElementById('mode-badge').innerText = "Manual"; }
+            if (document.activeElement !== slider) slider.value = data.heater_pwm;
+        }
+
+        document.getElementById('btn-auto').onclick = () => sendCommand({mode: 'auto'});
+        document.getElementById('btn-man').onclick = () => sendCommand({mode: 'manual'});
+        document.getElementById('heater-slider').oninput = (e) => { document.getElementById('slider-val').innerText = e.target.value + "%"; sendCommand({pwm: parseInt(e.target.value)}); };
+        document.getElementById('btn-reboot').onclick = () => { if(confirm("Restart MSAG?")) sendCommand({cmd: 'reboot'}); };
+        document.getElementById('btn-reset-kwh').onclick = () => { if(confirm("Skasować liczniki?")) sendCommand({cmd: 'reset_kwh'}); };
+
+        // ========================================================
+        // LOGIKA WYKRESÓW - Z MAGIĄ "24:00"
+        // ========================================================
+        let cloudChart = null;
+        let parsedData = [];
+        const monthNames = ["", "Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec", "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"];
+
+        function parseCustomDate(val) {
+            let str = String(val);
+            let match = str.match(/(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})/);
+            if (match) {
+                let h = parseInt(match[4], 10);
+                let m = parseInt(match[5], 10);
+                // MAGIA: Traktujemy finałowy zapis dnia jako 24:00
+                if (h === 23 && m >= 50) h = 24; 
+                return { day: parseInt(match[1], 10), month: parseInt(match[2], 10), year: parseInt(match[3], 10), hour: h };
+            }
+            let d = new Date(val);
+            if (!isNaN(d.getTime())) {
+                let h = d.getHours();
+                let m = d.getMinutes();
+                // To samo dla standardowego parsowania Date
+                if (h === 23 && m >= 50) h = 24;
+                return { day: d.getDate(), month: d.getMonth() + 1, year: d.getFullYear(), hour: h };
+            }
+            return null;
+        }
+
+        async function fetchCloudData() {
+            const btn = document.getElementById('btn-fetch-cloud');
+            btn.disabled = true; btn.innerText = "⏳...";
+            try {
+                const response = await fetch(GOOGLE_SCRIPT_URL + "?action=get_data");
+                const rawData = await response.json();
+                parsedData = [];
+                
+                rawData.forEach(row => {
+                    let d = parseCustomDate(row[0]);
+                    if(d) {
+                        let e = row[1], i = row[2], p = row[3];
+                        parsedData.push({ 
+                            ...d, 
+                            exp: (e === "" || e == null) ? null : parseFloat(e), 
+                            imp: (i === "" || i == null) ? null : parseFloat(i), 
+                            pv:  (p === "" || p == null) ? null : parseFloat(p) 
+                        });
+                    }
+                });
+                
+                populateYears();
+                renderLogic();
+                document.getElementById('cloud-status').innerText = `Pobrano ${parsedData.length} wpisów z dysku.`;
+            } catch (error) { document.getElementById('cloud-status').innerText = "Błąd: " + error.message; }
+            finally { btn.disabled = false; btn.innerText = "☁️ Odśwież"; }
+        }
+
+        function populateYears() {
+            let years = new Set(parsedData.map(d => d.year));
+            fillSelect('sel-year', Array.from(years).sort().reverse(), "Rok");
+        }
+
+        function updateFilters(level) {
+            const y = document.getElementById('sel-year').value;
+            const m = document.getElementById('sel-month').value;
+            if (level === 'year') {
+                if (y) {
+                    let months = new Set(parsedData.filter(d => d.year == y).map(d => d.month));
+                    fillSelectObjects('sel-month', Array.from(months).sort((a,b)=>a-b).map(n => ({ val: n, text: monthNames[n] })), "Miesiąc");
+                } else {
+                    document.getElementById('sel-month').innerHTML = '<option value="">Miesiąc</option>';
+                }
+                document.getElementById('sel-day').innerHTML = '<option value="">Dzień</option>';
+            } else if (level === 'month') {
+                if (y && m) {
+                    let days = new Set(parsedData.filter(d => d.year == y && d.month == m).map(d => d.day));
+                    fillSelect('sel-day', Array.from(days).sort((a,b)=>a-b), "Dzień");
+                } else {
+                    document.getElementById('sel-day').innerHTML = '<option value="">Dzień</option>';
+                }
+            }
+            renderLogic();
+        }
+
+        function fillSelect(id, items, def) {
+            const el = document.getElementById(id); el.innerHTML = `<option value="">${def}</option>`;
+            items.forEach(v => { el.innerHTML += `<option value="${v}">${v}</option>`; });
+        }
+        function fillSelectObjects(id, items, def) {
+            const el = document.getElementById(id); el.innerHTML = `<option value="">${def}</option>`;
+            items.forEach(o => { el.innerHTML += `<option value="${o.val}">${o.text}</option>`; });
+        }
+
+        function renderLogic() {
+            const y = document.getElementById('sel-year').value;
+            const m = document.getElementById('sel-month').value;
+            const d = document.getElementById('sel-day').value;
+            if (y && m && d) renderHourlyDelta(parseInt(y), parseInt(m), parseInt(d));
+            else if (y && m) renderDailySums(parseInt(y), parseInt(m));
+            else if (y) renderMonthlySums(parseInt(y));
+            else renderYearlySums();
+        }
+
+        function getAggregatedMaxes(filteredData, keyGen) {
+            let maxes = {};
+            filteredData.forEach(row => {
+                let key = keyGen(row);
+                if (!maxes[key]) maxes[key] = { exp: 0, imp: 0, pv: 0 };
+                if (row.exp !== null) maxes[key].exp = Math.max(maxes[key].exp, row.exp);
+                if (row.imp !== null) maxes[key].imp = Math.max(maxes[key].imp, row.imp);
+                if (row.pv !== null)  maxes[key].pv = Math.max(maxes[key].pv, row.pv);
+            });
+            return maxes;
+        }
+
+        function renderYearlySums() {
+            let dailyMaxes = getAggregatedMaxes(parsedData, r => `${r.year}-${r.month}-${r.day}`);
+            let yearly = {};
+            for (let k in dailyMaxes) {
+                let y = k.split('-')[0];
+                if (!yearly[y]) yearly[y] = { exp: 0, imp: 0, pv: 0 };
+                yearly[y].exp += dailyMaxes[k].exp; yearly[y].imp += dailyMaxes[k].imp; yearly[y].pv += dailyMaxes[k].pv;
+            }
+            let labels = Object.keys(yearly).sort();
+            drawChart('Produkcja Roczna', labels, labels.map(l=>yearly[l].exp), labels.map(l=>yearly[l].imp), labels.map(l=>yearly[l].pv), labels.map(l=>Math.max(0, yearly[l].pv-yearly[l].exp)));
+        }
+
+        function renderMonthlySums(year) {
+            let dailyMaxes = getAggregatedMaxes(parsedData.filter(d => d.year === year), r => `${r.month}-${r.day}`);
+            let monthly = {};
+            for (let k in dailyMaxes) {
+                let m = parseInt(k.split('-')[0]);
+                if (!monthly[m]) monthly[m] = { exp: 0, imp: 0, pv: 0 };
+                monthly[m].exp += dailyMaxes[k].exp; monthly[m].imp += dailyMaxes[k].imp; monthly[m].pv += dailyMaxes[k].pv;
+            }
+            let labels = Object.keys(monthly).sort((a,b)=>a-b);
+            drawChart(`Rok ${year}`, labels.map(m=>monthNames[m]), labels.map(m=>monthly[m].exp), labels.map(m=>monthly[m].imp), labels.map(m=>monthly[m].pv), labels.map(m=>Math.max(0, monthly[m].pv-monthly[m].exp)));
+        }
+
+        function renderDailySums(year, month) {
+            let dailyMaxes = getAggregatedMaxes(parsedData.filter(d => d.year === year && d.month === month), r => r.day);
+            let labels = Object.keys(dailyMaxes).sort((a,b)=>a-b);
+            drawChart(`${monthNames[month]} ${year}`, labels, labels.map(d=>dailyMaxes[d].exp), labels.map(d=>dailyMaxes[d].imp), labels.map(d=>dailyMaxes[d].pv), labels.map(d=>Math.max(0, dailyMaxes[d].pv-dailyMaxes[d].exp)));
+        }
+
+        // ========================================================
+        // GŁÓWNY ALGORYTM Z "24:00"
+        // ========================================================
+        function renderHourlyDelta(year, month, day) {
+            let dayData = parsedData.filter(d => d.year === year && d.month === month && d.day === day);
+            
+            // Tablica 25 slotów (od 0 do 24, gdzie 0 to wirtualne "00:00")
+            let daySlots = new Array(25).fill(null);
+            dayData.forEach(row => {
+                if (row.pv !== null || row.exp !== null) daySlots[row.hour] = row;
+            });
+
+            let labels = [], exp = [], imp = [], pv = [], aut = [];
+            let bgExp = [], bgImp = [], bgPv = [], bgAut = [];
+
+            // Szukamy bazowej wartości od której odliczamy pierwszy słupek
+            let pExp = 0, pImp = 0, pPv = 0;
+            if (daySlots[0] !== null) {
+                pExp = daySlots[0].exp || 0;
+                pImp = daySlots[0].imp || 0;
+                pPv  = daySlots[0].pv || 0;
+            }
+
+            let lastValidHour = 0; 
+            let deltas = new Array(25).fill(null);
+
+            // Wyliczanie delty idzie od godziny 1 do 24.
+            for (let h = 1; h <= 24; h++) {
+                let slot = daySlots[h];
+                if (slot !== null) {
+                    let gap = h - lastValidHour;
+
+                    let curExp = slot.exp || 0; let curImp = slot.imp || 0; let curPv  = slot.pv || 0;
+                    let dExp = curExp - pExp; let dImp = curImp - pImp; let dPv  = curPv - pPv;
+
+                    if (dExp < 0) dExp = curExp; if (dImp < 0) dImp = curImp; if (dPv < 0) dPv = curPv;
+
+                    let avgExp = dExp / gap; let avgImp = dImp / gap; let avgPv  = dPv / gap;
+
+                    for (let k = lastValidHour + 1; k <= h; k++) {
+                        deltas[k] = {
+                            exp: avgExp, imp: avgImp, pv: avgPv, aut: Math.max(0, avgPv - avgExp),
+                            isAveraged: (gap > 1) 
+                        };
+                    }
+
+                    pExp = curExp; pImp = curImp; pPv = curPv;
+                    lastValidHour = h;
+                }
+            }
+
+            // Budowanie wykresu - tylko od 1 do 24
+            for (let h = 1; h <= 24; h++) {
+                if (deltas[h] === null) deltas[h] = { exp: 0, imp: 0, pv: 0, aut: 0, isAveraged: false };
+                
+                // Rysujemy 24:00 na samym końcu osi X
+                labels.push(h === 24 ? "24:00" : h.toString().padStart(2, '0') + ":00");
+                exp.push(deltas[h].exp); imp.push(deltas[h].imp); pv.push(deltas[h].pv); aut.push(deltas[h].aut);
+
+                let alpha = deltas[h].isAveraged ? '0.3' : '0.9';
+                bgPv.push(`rgba(245, 158, 11, ${alpha})`);
+                bgAut.push(`rgba(139, 92, 246, ${alpha})`);
+                bgExp.push(`rgba(16, 185, 129, ${alpha})`);
+                bgImp.push(`rgba(239, 68, 68, ${alpha})`);
+            }
+
+            drawChart(`Wykres Godzinowy: ${day}.${month}.${year}`, labels, exp, imp, pv, aut, bgExp, bgImp, bgPv, bgAut);
+        }
+
+        function drawChart(title, labels, exp, imp, pv, aut, cExp, cImp, cPv, cAut) {
+            if (cloudChart) cloudChart.destroy();
+            cloudChart = new Chart(document.getElementById('cloudChart'), {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        { label: 'PV (Falownik)', data: pv, backgroundColor: cPv || 'rgba(245, 158, 11, 0.9)', borderRadius: 4 },
+                        { label: 'Autokonsumpcja', data: aut, backgroundColor: cAut || 'rgba(139, 92, 246, 0.9)', borderRadius: 4 },
+                        { label: 'Eksport', data: exp, backgroundColor: cExp || 'rgba(16, 185, 129, 0.9)', borderRadius: 4 },
+                        { label: 'Pobór', data: imp, backgroundColor: cImp || 'rgba(239, 68, 68, 0.9)', borderRadius: 4 }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { title: { display: true, text: title, color: '#fff' } },
+                    scales: { y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8' } }, x: { ticks: { color: '#94a3b8' } } }
+                }
+            });
+        }
+        window.onload = initWebSocket;
+    </script>
+</body>
+</html>
