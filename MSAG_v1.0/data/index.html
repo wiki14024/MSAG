@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MSAG v1.0 | Wiktor Nycek</title>
+    <title>MSAG v1.16 | Wiktor Nycek</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
@@ -96,13 +96,12 @@
         .dip.on::after { bottom: 18px; }
         .dip-label { font-size: 0.6rem; color: var(--text-dim); text-align: center; margin-top: 4px; }
 
-        /* WIDOK STATYSTYK */
         .stats-toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 16px; border: 1px solid var(--border);}
         .stats-toolbar select { padding: 10px; background: #1e293b; color: white; border: 1px solid var(--border); border-radius: 8px; outline: none; cursor: pointer;}
         .cloud-btn { padding: 10px 20px; background: rgba(16, 185, 129, 0.1); border: 1px solid var(--accent-green); color: var(--accent-green); font-weight: bold; border-radius: 8px; cursor: pointer; transition: 0.3s; }
         .chart-container { width: 100%; height: 500px; position: relative; } 
+        .live-chart-container { width: 100%; height: 200px; position: relative; margin-top: 20px; }
 
-        /* STOPKA Z PODPISEM */
         footer { margin-top: 40px; padding-bottom: 20px; font-size: 0.75rem; color: var(--text-dim); width: 100%; max-width: 1000px; display: flex; justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 10px; }
         .author-tag { background: rgba(59, 130, 246, 0.1); color: var(--accent-blue); padding: 4px 10px; border-radius: 6px; font-weight: 700; letter-spacing: 0.5px; border: 1px solid rgba(59, 130, 246, 0.2); }
     </style>
@@ -110,7 +109,7 @@
 <body>
 
     <header>
-        <div class="logo">MSAG <span id="fw-version" style="font-size: 0.8rem; color: var(--text-dim);">v1.05</span></div>
+        <div class="logo">MSAG <span id="fw-version" style="font-size: 0.8rem; color: var(--text-dim);">...</span></div>
         <div class="header-right">
             <div class="tabs">
                 <button class="tab-btn active" onclick="switchTab('dashboard')">Panel</button>
@@ -137,9 +136,15 @@
                 <g transform="translate(170, 150)"><rect width="60" height="60" rx="12" fill="rgba(59,130,246,0.1)" /><text x="30" y="35" text-anchor="middle" fill="white" font-size="24">🏠</text><text x="30" y="75" text-anchor="middle" class="node-label">DOM</text><text id="val-total" x="30" y="95" text-anchor="middle" class="node-value"></text></g>
                 <g id="heater-node" transform="translate(330, 170)"><rect id="heater-bg" width="60" height="60" rx="12" fill="rgba(245,158,11,0.1)" /><text x="30" y="35" text-anchor="middle" fill="white" font-size="24">🔥</text><circle id="heater-status-led" cx="52" cy="8" r="4" fill="#ef4444" /><text x="30" y="75" text-anchor="middle" class="node-label">GRZAŁKA</text><text id="val-heater" x="30" y="95" text-anchor="middle" class="node-value">0%</text></g>
             </svg>
+            
             <div class="stats-grid">
                 <div class="stat-box"><span class="stat-label">Eksport</span><span id="stat-export-w" class="stat-val" style="color:var(--accent-green)">--- W</span></div>
                 <div class="stat-box"><span class="stat-label">Pobór</span><span id="stat-import-w" class="stat-val" style="color:var(--accent-red)">--- W</span></div>
+            </div>
+
+            <div style="width: 100%; margin-top: 30px;">
+                <h3 style="font-size: 0.9rem; color: var(--text-dim); margin-bottom: 10px; text-transform: uppercase;">Balans Mocy (Ostatnie 5 min)</h3>
+                <div class="live-chart-container"><canvas id="liveChart"></canvas></div>
             </div>
         </div>
 
@@ -186,8 +191,8 @@
     </footer>
 
     <script>
-        // WPISZ TU SWÓJ LINK DO SKRYPTU GOOGLE
-        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzAcy2naRZOLIXcWL7EJqcBJneJ2xo41oJqKFPly6qPAq5zUFtkmoKOWeUMx3GuR9Fz/exec";
+        // URL POBIERANY DYNAMICZNIE Z ESP32
+        let google_script_url = "";
 
         function switchTab(tabId) {
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -198,16 +203,58 @@
 
         let data = { grid_p: 0, heater_pwm: 0, heater_active: false, ssr_v: 0, phases: [{v:0, a:0, p:0}, {v:0, a:0, p:0}, {v:0, a:0, p:0}], dips: { 1: false, 2: false, 3: false, 4: false }, mode: 'auto', uptime: '00:00:00', sys_color: 'blue', clock: '--', grid_hz: 0, cpu_temp: 0 };
         let websocket;
+        let frontendLiveChart = null;
 
         function initWebSocket() {
             websocket = new WebSocket(`ws://${window.location.hostname}/ws`);
             websocket.onopen = () => { document.getElementById('conn-indicator').classList.add('online'); document.getElementById('conn-text').innerText = 'ONLINE'; };
             websocket.onclose = () => { document.getElementById('conn-indicator').classList.remove('online'); document.getElementById('conn-text').innerText = 'OFFLINE'; setTimeout(initWebSocket, 2000); };
-            websocket.onmessage = (event) => { Object.assign(data, JSON.parse(event.data)); updateUI(); };
+            websocket.onmessage = (event) => { 
+                Object.assign(data, JSON.parse(event.data)); 
+                updateUI(); 
+            };
         }
         function sendCommand(cmd) { if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(JSON.stringify(cmd)); }
 
+        function renderLiveChart(points) {
+            const ctx = document.getElementById('liveChart').getContext('2d');
+            if (!frontendLiveChart) {
+                frontendLiveChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: Array.from({length: 60}, (_, i) => "-" + (60 - i - 1) * 5 + "s"),
+                        datasets: [{
+                            label: 'Eksport / Pobór (W)',
+                            data: points,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 0
+                        }]
+                    },
+                    options: { 
+                        responsive: true, 
+                        maintainAspectRatio: false,
+                        animation: false,
+                        scales: { 
+                            y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8' } },
+                            x: { ticks: { display: false } }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            } else {
+                frontendLiveChart.data.datasets[0].data = points;
+                frontendLiveChart.update();
+            }
+        }
+
         function updateUI() {
+            if (data.fw_version) document.getElementById('fw-version').innerText = data.fw_version;
+            if (data.cloud_url) google_script_url = data.cloud_url;
+            if (data.live_data) renderLiveChart(data.live_data);
+
             document.getElementById('clock').innerText = data.clock;
             document.getElementById('cpu-temp').innerText = data.cpu_temp.toFixed(1);
             document.getElementById('val-heater').textContent = data.heater_pwm + "%";
@@ -226,10 +273,34 @@
             if (data.heater_active) { ledH.style.fill = "var(--accent-green)"; document.getElementById('heater-node').classList.add('heater-active-anim'); } 
             else { ledH.style.fill = "var(--accent-red)"; document.getElementById('heater-node').classList.remove('heater-active-anim'); }
 
-            const fGrid = document.getElementById('flow-grid'); const fPv = document.getElementById('flow-pv'); const fHeater = document.getElementById('flow-heater');
-            if (Math.abs(data.grid_p) > 10) { fGrid.style.opacity = "1"; fGrid.style.stroke = data.grid_p < 0 ? "var(--accent-green)" : "var(--accent-red)"; data.grid_p < 0 ? fGrid.classList.add('flow-reverse') : fGrid.classList.remove('flow-reverse'); } else fGrid.style.opacity = "0";
-            if (data.grid_p < -50 || data.heater_active) { fPv.style.opacity = "1"; fPv.style.stroke = "var(--accent-green)"; } else fPv.style.opacity = "0";
-            if (data.heater_active) { fHeater.style.opacity = "1"; fHeater.style.stroke = "var(--accent-orange)"; } else fHeater.style.opacity = "0";
+            const fGrid = document.getElementById('flow-grid'); 
+            const fPv = document.getElementById('flow-pv'); 
+            const fHeater = document.getElementById('flow-heater');
+            
+            // Logika linii SIEĆ
+            if (Math.abs(data.grid_p) > 10) { 
+                fGrid.style.opacity = "1"; 
+                fGrid.style.stroke = data.grid_p < 0 ? "var(--accent-green)" : "var(--accent-red)"; 
+                data.grid_p < 0 ? fGrid.classList.add('flow-reverse') : fGrid.classList.remove('flow-reverse'); 
+            } else { 
+                fGrid.style.opacity = "0"; 
+            }
+            
+            // Logika linii PV (Przywrócona)
+            if (data.grid_p < -50 || data.heater_active) { 
+                fPv.style.opacity = "1"; 
+                fPv.style.stroke = "var(--accent-green)"; 
+            } else { 
+                fPv.style.opacity = "0"; 
+            }
+            
+            // Logika linii GRZAŁKA
+            if (data.heater_active) { 
+                fHeater.style.opacity = "1"; 
+                fHeater.style.stroke = "var(--accent-orange)"; 
+            } else { 
+                fHeater.style.opacity = "0"; 
+            }
 
             document.getElementById('led-rgb').style.background = `var(--accent-${data.sys_color})`;
             let dipSum = 0; [4, 2, 1, 0.5].forEach((w, i) => { if(data.dips[(i+1).toString()]) { document.getElementById('dip'+(i+1)).classList.add('on'); dipSum += w; } else document.getElementById('dip'+(i+1)).classList.remove('on'); });
@@ -250,7 +321,7 @@
         document.getElementById('btn-reset-kwh').onclick = () => { if(confirm("Skasować liczniki?")) sendCommand({cmd: 'reset_kwh'}); };
 
         // ========================================================
-        // LOGIKA WYKRESÓW - Z MAGIĄ "24:00"
+        // LOGIKA WYKRESÓW Z GOOGLE
         // ========================================================
         let cloudChart = null;
         let parsedData = [];
@@ -262,7 +333,6 @@
             if (match) {
                 let h = parseInt(match[4], 10);
                 let m = parseInt(match[5], 10);
-                // MAGIA: Traktujemy finałowy zapis dnia jako 24:00
                 if (h === 23 && m >= 50) h = 24; 
                 return { day: parseInt(match[1], 10), month: parseInt(match[2], 10), year: parseInt(match[3], 10), hour: h };
             }
@@ -270,7 +340,6 @@
             if (!isNaN(d.getTime())) {
                 let h = d.getHours();
                 let m = d.getMinutes();
-                // To samo dla standardowego parsowania Date
                 if (h === 23 && m >= 50) h = 24;
                 return { day: d.getDate(), month: d.getMonth() + 1, year: d.getFullYear(), hour: h };
             }
@@ -278,10 +347,14 @@
         }
 
         async function fetchCloudData() {
+            if(!google_script_url) {
+                alert("Brak URL z urządzenia. Upewnij się, że MSAG ma kontakt z WiFi.");
+                return;
+            }
             const btn = document.getElementById('btn-fetch-cloud');
             btn.disabled = true; btn.innerText = "⏳...";
             try {
-                const response = await fetch(GOOGLE_SCRIPT_URL + "?action=get_data");
+                const response = await fetch(google_script_url + "?action=get_data");
                 const rawData = await response.json();
                 parsedData = [];
                 
@@ -393,13 +466,8 @@
             drawChart(`${monthNames[month]} ${year}`, labels, labels.map(d=>dailyMaxes[d].exp), labels.map(d=>dailyMaxes[d].imp), labels.map(d=>dailyMaxes[d].pv), labels.map(d=>Math.max(0, dailyMaxes[d].pv-dailyMaxes[d].exp)));
         }
 
-        // ========================================================
-        // GŁÓWNY ALGORYTM Z "24:00"
-        // ========================================================
         function renderHourlyDelta(year, month, day) {
             let dayData = parsedData.filter(d => d.year === year && d.month === month && d.day === day);
-            
-            // Tablica 25 slotów (od 0 do 24, gdzie 0 to wirtualne "00:00")
             let daySlots = new Array(25).fill(null);
             dayData.forEach(row => {
                 if (row.pv !== null || row.exp !== null) daySlots[row.hour] = row;
@@ -408,7 +476,6 @@
             let labels = [], exp = [], imp = [], pv = [], aut = [];
             let bgExp = [], bgImp = [], bgPv = [], bgAut = [];
 
-            // Szukamy bazowej wartości od której odliczamy pierwszy słupek
             let pExp = 0, pImp = 0, pPv = 0;
             if (daySlots[0] !== null) {
                 pExp = daySlots[0].exp || 0;
@@ -419,12 +486,10 @@
             let lastValidHour = 0; 
             let deltas = new Array(25).fill(null);
 
-            // Wyliczanie delty idzie od godziny 1 do 24.
             for (let h = 1; h <= 24; h++) {
                 let slot = daySlots[h];
                 if (slot !== null) {
                     let gap = h - lastValidHour;
-
                     let curExp = slot.exp || 0; let curImp = slot.imp || 0; let curPv  = slot.pv || 0;
                     let dExp = curExp - pExp; let dImp = curImp - pImp; let dPv  = curPv - pPv;
 
@@ -438,17 +503,13 @@
                             isAveraged: (gap > 1) 
                         };
                     }
-
                     pExp = curExp; pImp = curImp; pPv = curPv;
                     lastValidHour = h;
                 }
             }
 
-            // Budowanie wykresu - tylko od 1 do 24
             for (let h = 1; h <= 24; h++) {
                 if (deltas[h] === null) deltas[h] = { exp: 0, imp: 0, pv: 0, aut: 0, isAveraged: false };
-                
-                // Rysujemy 24:00 na samym końcu osi X
                 labels.push(h === 24 ? "24:00" : h.toString().padStart(2, '0') + ":00");
                 exp.push(deltas[h].exp); imp.push(deltas[h].imp); pv.push(deltas[h].pv); aut.push(deltas[h].aut);
 
@@ -458,7 +519,6 @@
                 bgExp.push(`rgba(16, 185, 129, ${alpha})`);
                 bgImp.push(`rgba(239, 68, 68, ${alpha})`);
             }
-
             drawChart(`Wykres Godzinowy: ${day}.${month}.${year}`, labels, exp, imp, pv, aut, bgExp, bgImp, bgPv, bgAut);
         }
 
