@@ -1,6 +1,6 @@
 /* ====================================================================
  * PROJEKT: MSAG v1.16 PRO - Sterownik Autokonsumpcji PV
- * AUTOR: Wiktor Nycek
+ * ZMIANY: Miganie Blue, logowanie IP, obsługa http://msag.local/
  * ==================================================================== */
 
 #include <WiFi.h>
@@ -23,7 +23,7 @@
 // --- KONFIGURACJA I PINY ---
 const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzAcy2naRZOLIXcWL7EJqcBJneJ2xo41oJqKFPly6qPAq5zUFtkmoKOWeUMx3GuR9Fz/exec";
 const String FW_VERSION = "v1.16 PRO";
-const char* HOSTNAME = "msag";
+const char* HOSTNAME = "msag"; 
 
 #define PIN_DIP1 23
 #define PIN_DIP2 22
@@ -73,7 +73,6 @@ float p_total = 0.0;
 float ema_p_total = 0.0;
 const float EMA_ALPHA = 0.4;
 float ssr_v = 0.0;
-String aktualny_kolor = "teal"; 
 
 double total_export_kwh = 0.0, total_import_kwh = 0.0;
 double today_export_kwh = 0.0, today_import_kwh = 0.0;
@@ -85,7 +84,7 @@ float live_history[60];
 String formatTimestamp(uint32_t timestamp) {
   if (timestamp < 100000) return "Brak danych";
   time_t t = timestamp; struct tm *tm_info = localtime(&t);
-  char buf[20]; strftime(buf, sizeof(buf), "%d.%M.%Y %H:%M", tm_info);
+  char buf[20]; strftime(buf, sizeof(buf), "%d.%m.%Y %H:%M", tm_info); 
   return String(buf);
 }
 
@@ -108,23 +107,24 @@ void obliczMocGrzalki() {
 // --- SYSTEM SYGNALIZACJI LED (NON-BLOCKING) ---
 void aktualizujStanIKolory() {
     if (wifi_state == WIFI_CONNECTING) {
-        if ((millis() % 500) < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 128, 128)); // Teal
+        // Miganie turkusowe (Teal) - Próba nawiązania połączenia
+        if ((millis() % 500) < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 128, 128)); 
         else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
     }
     else if (wifi_state == WIFI_AP_MODE) {
-        int brightness = (abs((int)(millis() % 2000) - 1000) * 255) / 1000;
-        brightness = map(brightness, 0, 255, 10, 255); // Pulsowanie Blue
-        rgb_led.setPixelColor(0, rgb_led.Color(0, 0, brightness));
+        // Miganie Niebieskie (Blue) - Tryb Konfiguracji AP
+        if ((millis() % 500) < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 255));
+        else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
     }
     else { // WIFI_CONNECTED - Logika energii
         if (tryb_awaryjny) {
             if (millis() % 500 < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
-            else rgb_led.setPixelColor(0, rgb_led.Color(255, 0, 0)); // Miganie Red
+            else rgb_led.setPixelColor(0, rgb_led.Color(255, 0, 0)); // Miganie Czerwone
         } else {
-            if (ema_p_total > 100) rgb_led.setPixelColor(0, rgb_led.Color(255, 0, 0)); // Red (Import)
-            else if (ema_p_total < -100) rgb_led.setPixelColor(0, rgb_led.Color(0, 255, 0)); // Green (Export)
-            else if (aktualne_pwm > 102 && tryb_auto) rgb_led.setPixelColor(0, rgb_led.Color(255, 100, 0)); // Orange
-            else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 255)); // Blue (Balans)
+            if (ema_p_total > 100) rgb_led.setPixelColor(0, rgb_led.Color(255, 0, 0)); // Pobór (Red)
+            else if (ema_p_total < -100) rgb_led.setPixelColor(0, rgb_led.Color(0, 255, 0)); // Eksport (Green)
+            else if (aktualne_pwm > 102 && tryb_auto) rgb_led.setPixelColor(0, rgb_led.Color(255, 100, 0)); // Grzałka (Orange)
+            else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 255)); // Balans (Blue)
         }
     }
     rgb_led.show();
@@ -132,15 +132,19 @@ void aktualizujStanIKolory() {
 
 // --- MASZYNA STANÓW WIFI ---
 void obslugaWiFi() {
-    wm.process(); // Obsługa portalu w tle
+    wm.process(); 
     switch (wifi_state) {
         case WIFI_CONNECTING:
             if (WiFi.status() == WL_CONNECTED) {
-                Serial.println("[WIFI] Połączono!");
+                Serial.println("\n[WIFI] Połączono z routerem pomyślnie!");
+                Serial.print("[WIFI] Przydzielony adres IP: ");
+                Serial.println(WiFi.localIP());
+                Serial.println("[WIFI] Dostęp przez przeglądarkę pod adresem: http://msag.local/");
+                
                 if (ap_is_running) { wm.stopConfigPortal(); ap_is_running = false; }
                 wifi_state = WIFI_CONNECTED;
             } else if (millis() - wifi_state_timer > 15000) {
-                Serial.println("[WIFI] Timeout. Start Portalu AP...");
+                Serial.println("[WIFI] Nie udało się połączyć. Start trybu AP...");
                 if (!ap_is_running) { wm.startConfigPortal("MSAG-Konfiguracja"); ap_is_running = true; }
                 wifi_state = WIFI_AP_MODE;
                 last_reconnect_attempt = millis();
@@ -148,7 +152,7 @@ void obslugaWiFi() {
             break;
         case WIFI_CONNECTED:
             if (WiFi.status() != WL_CONNECTED) {
-                Serial.println("[WIFI] Rozłączono!");
+                Serial.println("\n[WIFI] Utrata połączenia! Próba reconnectu...");
                 wifi_state = WIFI_CONNECTING;
                 wifi_state_timer = millis();
             }
@@ -156,10 +160,15 @@ void obslugaWiFi() {
         case WIFI_AP_MODE:
             if (wm.getWiFiSSID() != "" && (millis() - last_reconnect_attempt > 30000)) {
                 last_reconnect_attempt = millis();
-                Serial.println("[WIFI] Próba tła...");
+                Serial.println("[WIFI] Sprawdzam po cichu czy router powrócił...");
                 WiFi.begin(); 
             }
             if (WiFi.status() == WL_CONNECTED) {
+                Serial.println("\n[WIFI] Router powrócił! Połączenie odzyskane.");
+                Serial.print("[WIFI] Przydzielony adres IP: ");
+                Serial.println(WiFi.localIP());
+                Serial.println("[WIFI] Dostęp przez przeglądarkę pod adresem: http://msag.local/");
+                
                 wm.stopConfigPortal(); ap_is_running = false;
                 wifi_state = WIFI_CONNECTED;
             }
@@ -205,12 +214,17 @@ void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *c, AwsEventType t, void 
 // --- SETUP ---
 void setup() {
   Serial.begin(115200); delay(1000);
+  Serial.println("\n\nSTART SYSTEMU MSAG v1.16 PRO");
   rgb_led.begin(); rgb_led.setBrightness(50);
   
   pinMode(PIN_RST_OUT, OUTPUT); digitalWrite(PIN_RST_OUT, LOW);
   pinMode(PIN_RST_IN, INPUT_PULLUP);
   pinMode(PIN_SSR_SENSE, INPUT);
+  pinMode(PIN_DIP1, INPUT_PULLUP); pinMode(PIN_DIP2, INPUT_PULLUP);
+  pinMode(PIN_DIP3, INPUT_PULLUP); pinMode(PIN_DIP4, INPUT_PULLUP);
+  
   ledcAttach(PIN_PWM_OUT, pwmFreq, pwmResolution); ledcWrite(PIN_PWM_OUT, 0);
+  obliczMocGrzalki();
   
   nvm.begin("msag", false);
   total_export_kwh = nvm.getDouble("exp_kwh", 0.0);
@@ -221,11 +235,32 @@ void setup() {
   LittleFS.begin(true);
 
   WiFi.mode(WIFI_STA); wm.setHostname(HOSTNAME); wm.setConfigPortalBlocking(false);
-  if (wm.getWiFiSSID() != "") { WiFi.begin(); wifi_state = WIFI_CONNECTING; wifi_state_timer = millis(); }
-  else { wm.startConfigPortal("MSAG-Konfiguracja"); ap_is_running = true; wifi_state = WIFI_AP_MODE; }
+  if (wm.getWiFiSSID() != "") { 
+      Serial.println("[WIFI] Próba połączenia z zapamiętaną siecią...");
+      WiFi.begin(); 
+      wifi_state = WIFI_CONNECTING; 
+      wifi_state_timer = millis(); 
+  }
+  else { 
+      Serial.println("[WIFI] Brak sieci. Start AP MSAG-Konfiguracja.");
+      wm.startConfigPortal("MSAG-Konfiguracja"); 
+      ap_is_running = true; 
+      wifi_state = WIFI_AP_MODE; 
+  }
 
-  MDNS.begin(HOSTNAME); configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org");
-  ws.onEvent(onWsEvent); server.addHandler(&ws); server.begin(); ElegantOTA.begin(&server);
+// --- REJESTRACJA mDNS ---
+  if (MDNS.begin(HOSTNAME)) {
+      Serial.println("[mDNS] Usługa mDNS uruchomiona poprawnie.");
+      MDNS.addService("http", "tcp", 80);
+  }
+
+  configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org");
+  ws.onEvent(onWsEvent); 
+  server.addHandler(&ws); 
+  server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html"); 
+  
+  ElegantOTA.begin(&server); 
+  server.begin(); 
 }
 
 // --- LOOP ---
@@ -234,6 +269,12 @@ void loop() {
   ws.cleanupClients(); ElegantOTA.loop();
 
   if (millis() - last_led_update >= 50) { last_led_update = millis(); aktualizujStanIKolory(); }
+
+  // Reset WiFi przez zworkę
+  if (digitalRead(PIN_RST_IN) == LOW) {
+      static unsigned long rst_start = 0; if (rst_start == 0) rst_start = millis();
+      if (millis() - rst_start > 5000) { wm.resetSettings(); ESP.restart(); }
+  }
 
   ssr_v = (analogRead(PIN_SSR_SENSE) * 3.3 / 4095.0) * 3.0;
   if (millis() - last_control_loop >= 333) { last_control_loop = millis();
@@ -247,11 +288,17 @@ void loop() {
   }
 
   if (millis() - last_ws_update >= 1000) { last_ws_update = millis();
+    obliczMocGrzalki();
     double re = licznik_atm.GetExportEnergy(); double ri = licznik_atm.GetImportEnergy();
     if (re > 0) { total_export_kwh += re; today_export_kwh += re; }
     if (ri > 0) { total_import_kwh += ri; today_import_kwh += ri; }
     if (aktualne_pwm > 512 && ssr_v < 1.0) tryb_awaryjny = true;
     
+    struct tm ti; if (getLocalTime(&ti) && ti.tm_year > 123) {
+        if (ti.tm_hour == 0 && ti.tm_min == 0) { today_export_kwh = 0; today_import_kwh = 0; }
+        if (ti.tm_min == 0 || ti.tm_min == 30) trigger_google_sync = true;
+    }
+
     static int lt = 0; if (++lt >= 5) { lt = 0;
       for(int i=0; i<59; i++) live_history[i] = live_history[i+1];
       live_history[59] = ema_p_total; wyslijDaneWebsocket(true);
