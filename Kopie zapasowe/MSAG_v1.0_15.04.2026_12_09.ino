@@ -1,6 +1,6 @@
 /* ====================================================================
  * PROJEKT: MSAG v1.16 PRO - Sterownik Autokonsumpcji PV
- * ZMIANY: Buforowanie offline (Kolejka NVM), Timestamp ESP-Side, FreeRTOS Task, Logi Fazy
+ * ZMIANY: Buforowanie offline (Kolejka NVM), Timestamp ESP-Side
  * ==================================================================== */
 
 #include <WiFi.h>
@@ -21,7 +21,7 @@
 #include <WiFiManager.h>
 
 // --- KONFIGURACJA I PINY ---
-const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxSyhAEa9GBRaPFcB29TTm2KTVomfVwHMjd_FWGZS_nxbdR6pqymmmnGaTk93RbLbYD/exec";
+const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzAcy2naRZOLIXcWL7EJqcBJneJ2xo41oJqKFPly6qPAq5zUFtkmoKOWeUMx3GuR9Fz/exec";
 const String FW_VERSION = "v1.16 PRO";
 const char* HOSTNAME = "msag"; 
 
@@ -70,9 +70,9 @@ AsyncWebSocket ws("/ws");
 Adafruit_NeoPixel rgb_led(NUMPIXELS, PIN_RGB, NEO_GRB + NEO_KHZ800);
 Preferences nvm;
 WiFiManager wm;
-SemaphoreHandle_t spiMutex; // MUTEX DO OCHRONY SPI
 
 float p_max_heater = 0.0;
+unsigned long last_control_loop = 0;
 unsigned long last_ws_update = 0;
 unsigned long last_google_try = 0;
 unsigned long last_led_update = 0;
@@ -87,30 +87,6 @@ float ssr_v = 0.0;
 double total_export_kwh = 0.0, total_import_kwh = 0.0;
 double today_export_kwh = 0.0, today_import_kwh = 0.0;
 float live_history[60];
-
-// --- TASK: KONTROLA PWM I ODCZYT MOCY (WYSOKI PRIORYTET) ---
-void ControlTask(void *pvParameters) {
-    for(;;) {
-        // Bezpieczny odczyt z licznika
-        if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            p_total = licznik_atm.GetTotalActivePower();
-            xSemaphoreGive(spiMutex);
-        }
-
-        ema_p_total = (EMA_ALPHA * p_total) + ((1.0 - EMA_ALPHA) * ema_p_total);
-        
-        if (tryb_auto && !tryb_awaryjny) {
-            if (ema_p_total > -50) aktualne_pwm -= 40; 
-            else if (ema_p_total < -100) aktualne_pwm += 20;
-            aktualne_pwm = constrain(aktualne_pwm, 0, 1023);
-        }
-        
-        ledcWrite(PIN_PWM_OUT, tryb_awaryjny ? 0 : aktualne_pwm);
-        
-        // Zwalniamy procesor na równe 333 ms
-        vTaskDelay(pdMS_TO_TICKS(333));
-    }
-}
 
 // --- FUNKCJE POMOCNICZE ---
 String formatTimestamp(uint32_t timestamp) {
@@ -205,6 +181,7 @@ void zapiszKolejkeDoNVM() {
 
 void dodajDoKolejki(uint32_t ts, double e, double i, bool fz) {
     if (queue_size >= 24) {
+        // Zabezpieczenie: jeśli nie ma wifi przez cały dzień, usuwa najstarszy pomiar by zrobić miejsce nowemu
         for(int j=0; j<23; j++) syncQueue[j] = syncQueue[j+1];
         queue_size = 23;
     }
@@ -221,14 +198,15 @@ void dodajDoKolejki(uint32_t ts, double e, double i, bool fz) {
 void rozladujKolejkeDoGoogle() {
     if (WiFi.status() != WL_CONNECTED || queue_size == 0) return;
     
-    PendingRecord rec = syncQueue[0];
+    PendingRecord rec = syncQueue[0]; // Bierzemy najstarszy wpis
     
+    // Konwersja czasu na Format Google
     char timeStr[20];
     time_t t = rec.timestamp; struct tm *ti = localtime(&t);
     strftime(timeStr, sizeof(timeStr), "%d.%m.%Y %H:%M", ti);
     
     String timeParam = String(timeStr);
-    timeParam.replace(" ", "%20"); 
+    timeParam.replace(" ", "%20"); // Zamiana spacji by link działał poprawnnie
 
     int pv_flag = (rec.force_zero || rec.is_offline) ? 0 : 1;
 
@@ -239,12 +217,13 @@ void rozladujKolejkeDoGoogle() {
                  "&pv_active=" + String(pv_flag);
                  
     http.begin(client, url); 
-    http.setTimeout(20000); 
+    http.setTimeout(20000); // Wydłużony czas na falownik
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     
     int httpCode = http.GET();
     if (httpCode == 200) { 
         Serial.println("[GOOGLE] Wysłano pomiar z godziny: " + String(timeStr));
+        // Przesunięcie kolejki (kasujemy ten już wysłany)
         for(int i=0; i<queue_size-1; i++) syncQueue[i] = syncQueue[i+1];
         queue_size--;
         zapiszKolejkeDoNVM();
@@ -282,9 +261,6 @@ void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *c, AwsEventType t, void 
 void setup() {
   Serial.begin(115200); delay(1000);
   Serial.println("\n\nSTART SYSTEMU MSAG v1.16 PRO");
-  
-  spiMutex = xSemaphoreCreateMutex(); // INICJALIZACJA MUTEXU
-  
   rgb_led.begin(); rgb_led.setBrightness(50);
   
   pinMode(PIN_RST_OUT, OUTPUT); digitalWrite(PIN_RST_OUT, LOW);
@@ -300,6 +276,7 @@ void setup() {
   total_export_kwh = nvm.getDouble("exp_kwh", 0.0);
   total_import_kwh = nvm.getDouble("imp_kwh", 0.0);
   
+  // Wczytywanie ewentualnej kolejki po utracie zasilania
   queue_size = nvm.getInt("q_size", 0);
   if (queue_size > 0 && queue_size <= 24) {
       nvm.getBytes("queue", syncQueue, sizeof(PendingRecord) * queue_size);
@@ -325,9 +302,6 @@ void setup() {
   ws.onEvent(onWsEvent); server.addHandler(&ws); 
   server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html"); 
   ElegantOTA.begin(&server); server.begin(); 
-  
-  // URUCHOMIENIE ZADANIA KONTROLNEGO
-  xTaskCreate(ControlTask, "Control_Task", 4096, NULL, 2, NULL);
 }
 
 // --- LOOP ---
@@ -343,38 +317,20 @@ void loop() {
   }
 
   ssr_v = (analogRead(PIN_SSR_SENSE) * 3.3 / 4095.0) * 3.0;
-
-  // --- LOGI SERYJNE 1 HZ ---
-  static unsigned long last_serial_log = 0;
-  if (millis() - last_serial_log >= 1000) {
-      last_serial_log = millis();
-      
-      if (wifi_state == WIFI_CONNECTED) {
-          // Pobieramy dane z licznika zabezpieczone Mutexem
-          if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-              float v1 = licznik_atm.GetLineVoltageA(); float a1 = licznik_atm.GetLineCurrentA(); float phi1 = licznik_atm.GetPhaseA();
-              float v2 = licznik_atm.GetLineVoltageB(); float a2 = licznik_atm.GetLineCurrentB(); float phi2 = licznik_atm.GetPhaseB();
-              float v3 = licznik_atm.GetLineVoltageC(); float a3 = licznik_atm.GetLineCurrentC(); float phi3 = licznik_atm.GetPhaseC();
-              xSemaphoreGive(spiMutex);
-
-              Serial.printf("LOG [%s] L1:%.1fV %.2fA %.1f° | L2:%.1fV %.2fA %.1f° | L3:%.1fV %.2fA %.1f° | PWM:%d%%\n", 
-                  getUptime().c_str(), v1, a1, phi1, v2, a2, phi2, v3, a3, phi3, (aktualne_pwm*100)/1023);
-          }
-      }
+  if (millis() - last_control_loop >= 333) { last_control_loop = millis();
+    p_total = licznik_atm.GetTotalActivePower();
+    ema_p_total = (EMA_ALPHA * p_total) + ((1.0 - EMA_ALPHA) * ema_p_total);
+    if (tryb_auto && !tryb_awaryjny) {
+      if (ema_p_total > -50) aktualne_pwm -= 40; else if (ema_p_total < -100) aktualne_pwm += 20;
+      aktualne_pwm = constrain(aktualne_pwm, 0, 1023);
+    }
+    ledcWrite(PIN_PWM_OUT, tryb_awaryjny ? 0 : aktualne_pwm);
   }
 
   // OBSŁUGA CZASU, LICZNIKÓW I KOLEJKOWANIA
   if (millis() - last_ws_update >= 1000) { last_ws_update = millis();
     obliczMocGrzalki();
-    
-    // Zabezpieczony Mutexem odczyt liczników energii
-    double re = 0.0, ri = 0.0;
-    if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        re = licznik_atm.GetExportEnergy(); 
-        ri = licznik_atm.GetImportEnergy();
-        xSemaphoreGive(spiMutex);
-    }
-    
+    double re = licznik_atm.GetExportEnergy(); double ri = licznik_atm.GetImportEnergy();
     if (re > 0) { total_export_kwh += re; today_export_kwh += re; }
     if (ri > 0) { total_import_kwh += ri; today_import_kwh += ri; }
     if (aktualne_pwm > 512 && ssr_v < 1.0) tryb_awaryjny = true;
@@ -383,6 +339,7 @@ void loop() {
     if (getLocalTime(&ti) && ti.tm_year > 123) {
         
         static int last_sync_min = -1;
+        // Sprawdzamy dokładnie raz w minucie
         if (ti.tm_min != last_sync_min) {
             last_sync_min = ti.tm_min;
             
@@ -400,6 +357,7 @@ void loop() {
                 dodajDoKolejki((uint32_t)now, today_export_kwh, today_import_kwh, force_z);
             }
             
+            // Bezpieczny backup liczników (nie mylić z kolejką google)
             static int last_saved_hour = -1;
             if (ti.tm_hour != last_saved_hour) {
                 last_saved_hour = ti.tm_hour;

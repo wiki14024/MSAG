@@ -1,5 +1,7 @@
 MSAG_v1.0_15.04.2026_11_04
 Naprawiono połączenia z WiFi. Wreszcie procedura łączenia działa jak należy
+MSAG_v1.0_15.04.2026_12_09.ino
+Program przed podziałem na TASKi
 
 MSAG_Connector_15.04.2026.gs
 Wersja ktora działała do 15.04. 
