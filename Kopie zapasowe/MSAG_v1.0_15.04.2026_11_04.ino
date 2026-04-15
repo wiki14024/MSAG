@@ -1,6 +1,6 @@
 /* ====================================================================
  * PROJEKT: MSAG v1.16 PRO - Sterownik Autokonsumpcji PV
- * ZMIANY: Buforowanie offline (Kolejka NVM), Timestamp ESP-Side
+ * ZMIANY: Miganie Blue, logowanie IP, obsługa http://msag.local/
  * ==================================================================== */
 
 #include <WiFi.h>
@@ -45,17 +45,6 @@ const int pwmFreq = 5000;
 const int pwmResolution = 10;
 #define NUMPIXELS 1
 
-// --- KOLEJKA OFFLINE DLA GOOGLE (Max 24 wpisy = 1 cała doba braku prądu/wifi) ---
-struct PendingRecord {
-    uint32_t timestamp;
-    double exp;
-    double imp;
-    bool force_zero;
-    bool is_offline;
-};
-PendingRecord syncQueue[24];
-int queue_size = 0;
-
 // --- STAN WIFI (State Machine) ---
 enum WiFiState { WIFI_INIT, WIFI_CONNECTING, WIFI_CONNECTED, WIFI_AP_MODE };
 WiFiState wifi_state = WIFI_INIT;
@@ -74,6 +63,7 @@ WiFiManager wm;
 float p_max_heater = 0.0;
 unsigned long last_control_loop = 0;
 unsigned long last_ws_update = 0;
+unsigned long last_wifi_check = 0;
 unsigned long last_google_try = 0;
 unsigned long last_led_update = 0;
 volatile int aktualne_pwm = 0;
@@ -86,6 +76,8 @@ float ssr_v = 0.0;
 
 double total_export_kwh = 0.0, total_import_kwh = 0.0;
 double today_export_kwh = 0.0, today_import_kwh = 0.0;
+uint32_t start_timestamp = 0, last_timestamp = 0;
+bool trigger_google_sync = false, force_zero_sync = false;
 float live_history[60];
 
 // --- FUNKCJE POMOCNICZE ---
@@ -112,25 +104,27 @@ void obliczMocGrzalki() {
   if (p_max_heater == 0) p_max_heater = 1000.0;
 }
 
-// --- SYSTEM SYGNALIZACJI LED ---
+// --- SYSTEM SYGNALIZACJI LED (NON-BLOCKING) ---
 void aktualizujStanIKolory() {
     if (wifi_state == WIFI_CONNECTING) {
+        // Miganie turkusowe (Teal) - Próba nawiązania połączenia
         if ((millis() % 500) < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 128, 128)); 
         else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
     }
     else if (wifi_state == WIFI_AP_MODE) {
+        // Miganie Niebieskie (Blue) - Tryb Konfiguracji AP
         if ((millis() % 500) < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 255));
         else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
     }
-    else { 
+    else { // WIFI_CONNECTED - Logika energii
         if (tryb_awaryjny) {
             if (millis() % 500 < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
-            else rgb_led.setPixelColor(0, rgb_led.Color(255, 0, 0)); 
+            else rgb_led.setPixelColor(0, rgb_led.Color(255, 0, 0)); // Miganie Czerwone
         } else {
-            if (ema_p_total > 100) rgb_led.setPixelColor(0, rgb_led.Color(255, 0, 0)); 
-            else if (ema_p_total < -100) rgb_led.setPixelColor(0, rgb_led.Color(0, 255, 0)); 
-            else if (aktualne_pwm > 102 && tryb_auto) rgb_led.setPixelColor(0, rgb_led.Color(255, 100, 0)); 
-            else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 255)); 
+            if (ema_p_total > 100) rgb_led.setPixelColor(0, rgb_led.Color(255, 0, 0)); // Pobór (Red)
+            else if (ema_p_total < -100) rgb_led.setPixelColor(0, rgb_led.Color(0, 255, 0)); // Eksport (Green)
+            else if (aktualne_pwm > 102 && tryb_auto) rgb_led.setPixelColor(0, rgb_led.Color(255, 100, 0)); // Grzałka (Orange)
+            else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 255)); // Balans (Blue)
         }
     }
     rgb_led.show();
@@ -143,97 +137,57 @@ void obslugaWiFi() {
         case WIFI_CONNECTING:
             if (WiFi.status() == WL_CONNECTED) {
                 Serial.println("\n[WIFI] Połączono z routerem pomyślnie!");
-                Serial.print("[WIFI] Przydzielony adres IP: "); Serial.println(WiFi.localIP());
-                Serial.println("[WIFI] Dostęp: http://msag.local/");
+                Serial.print("[WIFI] Przydzielony adres IP: ");
+                Serial.println(WiFi.localIP());
+                Serial.println("[WIFI] Dostęp przez przeglądarkę pod adresem: http://msag.local/");
+                
                 if (ap_is_running) { wm.stopConfigPortal(); ap_is_running = false; }
                 wifi_state = WIFI_CONNECTED;
             } else if (millis() - wifi_state_timer > 15000) {
                 Serial.println("[WIFI] Nie udało się połączyć. Start trybu AP...");
                 if (!ap_is_running) { wm.startConfigPortal("MSAG-Konfiguracja"); ap_is_running = true; }
-                wifi_state = WIFI_AP_MODE; last_reconnect_attempt = millis();
+                wifi_state = WIFI_AP_MODE;
+                last_reconnect_attempt = millis();
             }
             break;
         case WIFI_CONNECTED:
             if (WiFi.status() != WL_CONNECTED) {
                 Serial.println("\n[WIFI] Utrata połączenia! Próba reconnectu...");
-                wifi_state = WIFI_CONNECTING; wifi_state_timer = millis();
+                wifi_state = WIFI_CONNECTING;
+                wifi_state_timer = millis();
             }
             break;
         case WIFI_AP_MODE:
             if (wm.getWiFiSSID() != "" && (millis() - last_reconnect_attempt > 30000)) {
-                last_reconnect_attempt = millis(); Serial.println("[WIFI] Sprawdzam po cichu czy router powrócił...");
+                last_reconnect_attempt = millis();
+                Serial.println("[WIFI] Sprawdzam po cichu czy router powrócił...");
                 WiFi.begin(); 
             }
             if (WiFi.status() == WL_CONNECTED) {
                 Serial.println("\n[WIFI] Router powrócił! Połączenie odzyskane.");
-                Serial.print("[WIFI] Przydzielony adres IP: "); Serial.println(WiFi.localIP());
-                wm.stopConfigPortal(); ap_is_running = false; wifi_state = WIFI_CONNECTED;
+                Serial.print("[WIFI] Przydzielony adres IP: ");
+                Serial.println(WiFi.localIP());
+                Serial.println("[WIFI] Dostęp przez przeglądarkę pod adresem: http://msag.local/");
+                
+                wm.stopConfigPortal(); ap_is_running = false;
+                wifi_state = WIFI_CONNECTED;
             }
             break;
     }
 }
 
-// --- OBSŁUGA KOLEJKI NVM DLA GOOGLE ---
-void zapiszKolejkeDoNVM() {
-    nvm.putInt("q_size", queue_size);
-    if (queue_size > 0) nvm.putBytes("queue", syncQueue, sizeof(PendingRecord) * queue_size);
+// --- KOMUNIKACJA GOOGLE I WS ---
+void syncWithGoogle() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  WiFiClientSecure client; client.setInsecure(); HTTPClient http;
+  String url = GOOGLE_SCRIPT_URL + "?export=" + (force_zero_sync ? "0" : String(today_export_kwh, 3)) + 
+               "&import=" + (force_zero_sync ? "0" : String(today_import_kwh, 3));
+  http.begin(client, url); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  if (http.GET() == 200) { trigger_google_sync = false; force_zero_sync = false; }
+  else { nvm.putDouble("exp_kwh", total_export_kwh); nvm.putDouble("imp_kwh", total_import_kwh); }
+  http.end();
 }
 
-void dodajDoKolejki(uint32_t ts, double e, double i, bool fz) {
-    if (queue_size >= 24) {
-        // Zabezpieczenie: jeśli nie ma wifi przez cały dzień, usuwa najstarszy pomiar by zrobić miejsce nowemu
-        for(int j=0; j<23; j++) syncQueue[j] = syncQueue[j+1];
-        queue_size = 23;
-    }
-    syncQueue[queue_size].timestamp = ts;
-    syncQueue[queue_size].exp = e;
-    syncQueue[queue_size].imp = i;
-    syncQueue[queue_size].force_zero = fz;
-    syncQueue[queue_size].is_offline = (WiFi.status() != WL_CONNECTED);
-    queue_size++;
-    zapiszKolejkeDoNVM();
-    Serial.printf("[KOLEJKA] Dodano nowy pomiar. Oczekuje wpisów: %d\n", queue_size);
-}
-
-void rozladujKolejkeDoGoogle() {
-    if (WiFi.status() != WL_CONNECTED || queue_size == 0) return;
-    
-    PendingRecord rec = syncQueue[0]; // Bierzemy najstarszy wpis
-    
-    // Konwersja czasu na Format Google
-    char timeStr[20];
-    time_t t = rec.timestamp; struct tm *ti = localtime(&t);
-    strftime(timeStr, sizeof(timeStr), "%d.%m.%Y %H:%M", ti);
-    
-    String timeParam = String(timeStr);
-    timeParam.replace(" ", "%20"); // Zamiana spacji by link działał poprawnnie
-
-    int pv_flag = (rec.force_zero || rec.is_offline) ? 0 : 1;
-
-    WiFiClientSecure client; client.setInsecure(); HTTPClient http;
-    String url = GOOGLE_SCRIPT_URL + "?export=" + (rec.force_zero ? "0" : String(rec.exp, 3)) + 
-                 "&import=" + (rec.force_zero ? "0" : String(rec.imp, 3)) +
-                 "&time=" + timeParam +
-                 "&pv_active=" + String(pv_flag);
-                 
-    http.begin(client, url); 
-    http.setTimeout(20000); // Wydłużony czas na falownik
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    
-    int httpCode = http.GET();
-    if (httpCode == 200) { 
-        Serial.println("[GOOGLE] Wysłano pomiar z godziny: " + String(timeStr));
-        // Przesunięcie kolejki (kasujemy ten już wysłany)
-        for(int i=0; i<queue_size-1; i++) syncQueue[i] = syncQueue[i+1];
-        queue_size--;
-        zapiszKolejkeDoNVM();
-    } else {
-        Serial.printf("[GOOGLE] Błąd wysyłki (HTTP %d). Ponowna próba za chwilę.\n", httpCode);
-    }
-    http.end();
-}
-
-// --- WEBSOCKET ---
 void wyslijDaneWebsocket(bool sendLive) {
   JsonDocument doc; doc["grid_p"] = (int)p_total;
   doc["heater_pwm"] = (aktualne_pwm * 100) / 1023;
@@ -276,13 +230,6 @@ void setup() {
   total_export_kwh = nvm.getDouble("exp_kwh", 0.0);
   total_import_kwh = nvm.getDouble("imp_kwh", 0.0);
   
-  // Wczytywanie ewentualnej kolejki po utracie zasilania
-  queue_size = nvm.getInt("q_size", 0);
-  if (queue_size > 0 && queue_size <= 24) {
-      nvm.getBytes("queue", syncQueue, sizeof(PendingRecord) * queue_size);
-      Serial.printf("[NVM] Przywrócono kolejkę zaległych pomiarów: %d wpisów\n", queue_size);
-  } else { queue_size = 0; }
-  
   SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SPI_CS);
   licznik_atm.begin(PIN_SPI_CS, 50, 0, 8000, 8000, 8000, 8000);
   LittleFS.begin(true);
@@ -290,18 +237,30 @@ void setup() {
   WiFi.mode(WIFI_STA); wm.setHostname(HOSTNAME); wm.setConfigPortalBlocking(false);
   if (wm.getWiFiSSID() != "") { 
       Serial.println("[WIFI] Próba połączenia z zapamiętaną siecią...");
-      WiFi.begin(); wifi_state = WIFI_CONNECTING; wifi_state_timer = millis(); 
-  } else { 
+      WiFi.begin(); 
+      wifi_state = WIFI_CONNECTING; 
+      wifi_state_timer = millis(); 
+  }
+  else { 
       Serial.println("[WIFI] Brak sieci. Start AP MSAG-Konfiguracja.");
-      wm.startConfigPortal("MSAG-Konfiguracja"); ap_is_running = true; wifi_state = WIFI_AP_MODE; 
+      wm.startConfigPortal("MSAG-Konfiguracja"); 
+      ap_is_running = true; 
+      wifi_state = WIFI_AP_MODE; 
   }
 
-  if (MDNS.begin(HOSTNAME)) { MDNS.addService("http", "tcp", 80); }
+// --- REJESTRACJA mDNS ---
+  if (MDNS.begin(HOSTNAME)) {
+      Serial.println("[mDNS] Usługa mDNS uruchomiona poprawnie.");
+      MDNS.addService("http", "tcp", 80);
+  }
 
   configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org");
-  ws.onEvent(onWsEvent); server.addHandler(&ws); 
+  ws.onEvent(onWsEvent); 
+  server.addHandler(&ws); 
   server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html"); 
-  ElegantOTA.begin(&server); server.begin(); 
+  
+  ElegantOTA.begin(&server); 
+  server.begin(); 
 }
 
 // --- LOOP ---
@@ -311,6 +270,7 @@ void loop() {
 
   if (millis() - last_led_update >= 50) { last_led_update = millis(); aktualizujStanIKolory(); }
 
+  // Reset WiFi przez zworkę
   if (digitalRead(PIN_RST_IN) == LOW) {
       static unsigned long rst_start = 0; if (rst_start == 0) rst_start = millis();
       if (millis() - rst_start > 5000) { wm.resetSettings(); ESP.restart(); }
@@ -327,7 +287,6 @@ void loop() {
     ledcWrite(PIN_PWM_OUT, tryb_awaryjny ? 0 : aktualne_pwm);
   }
 
-  // OBSŁUGA CZASU, LICZNIKÓW I KOLEJKOWANIA
   if (millis() - last_ws_update >= 1000) { last_ws_update = millis();
     obliczMocGrzalki();
     double re = licznik_atm.GetExportEnergy(); double ri = licznik_atm.GetImportEnergy();
@@ -335,37 +294,9 @@ void loop() {
     if (ri > 0) { total_import_kwh += ri; today_import_kwh += ri; }
     if (aktualne_pwm > 512 && ssr_v < 1.0) tryb_awaryjny = true;
     
-    struct tm ti; 
-    if (getLocalTime(&ti) && ti.tm_year > 123) {
-        
-        static int last_sync_min = -1;
-        // Sprawdzamy dokładnie raz w minucie
-        if (ti.tm_min != last_sync_min) {
-            last_sync_min = ti.tm_min;
-            
-            if (ti.tm_hour == 0 && ti.tm_min == 0) { today_export_kwh = 0; today_import_kwh = 0; }
-            
-            bool add_to_q = false;
-            bool force_z = false;
-            
-            if (ti.tm_hour == 0 && ti.tm_min == 5) { add_to_q = true; force_z = true; }
-            else if (ti.tm_min == 0 || ti.tm_min == 30) { add_to_q = true; force_z = false; }
-            else if (ti.tm_hour == 23 && ti.tm_min == 59) { add_to_q = true; force_z = false; }
-            
-            if (add_to_q) {
-                time_t now; time(&now);
-                dodajDoKolejki((uint32_t)now, today_export_kwh, today_import_kwh, force_z);
-            }
-            
-            // Bezpieczny backup liczników (nie mylić z kolejką google)
-            static int last_saved_hour = -1;
-            if (ti.tm_hour != last_saved_hour) {
-                last_saved_hour = ti.tm_hour;
-                nvm.putDouble("exp_kwh", total_export_kwh);
-                nvm.putDouble("imp_kwh", total_import_kwh);
-                Serial.println("[NVM] Zapisano stan liczników (1/h)");
-            }
-        }
+    struct tm ti; if (getLocalTime(&ti) && ti.tm_year > 123) {
+        if (ti.tm_hour == 0 && ti.tm_min == 0) { today_export_kwh = 0; today_import_kwh = 0; }
+        if (ti.tm_min == 0 || ti.tm_min == 30) trigger_google_sync = true;
     }
 
     static int lt = 0; if (++lt >= 5) { lt = 0;
@@ -374,9 +305,7 @@ void loop() {
     } else wyslijDaneWebsocket(false);
   }
 
-  // MECHANIZM ROZŁADOWANIA KOLEJKI DO GOOGLE
-  if (queue_size > 0 && millis() - last_google_try >= 15000) {
-    last_google_try = millis(); 
-    rozladujKolejkeDoGoogle();
+  if (trigger_google_sync && millis() - last_google_try >= 15000) {
+    last_google_try = millis(); syncWithGoogle();
   }
 }
