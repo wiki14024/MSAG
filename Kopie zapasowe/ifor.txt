@@ -2,7 +2,15 @@ MSAG_v1.0_15.04.2026_11_04
 Naprawiono połączenia z WiFi. Wreszcie procedura łączenia działa jak należy
 MSAG_v1.0_15.04.2026_12_09.ino
 Program przed podziałem na TASKi
+MSAG_v1.0_15.04.2026_10_10.ino
+Wersja przed zmianami przed Deepseak
+
 
 MSAG_Connector_15.04.2026.gs
 Wersja ktora działała do 15.04. 
 Nowa wersja wpisuje goddzony które podsyła ESP a nie to co dysk google widzi
+MSAG_Connector_15.04.2026_10_10
+Wersja przed zmianami przed Deepseak
+
+index_15.04.2026_10_10.html
+Wersja przed zmianami przed Deepseak

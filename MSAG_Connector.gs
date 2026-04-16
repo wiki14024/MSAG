@@ -3,10 +3,6 @@
 // WERSJA: Zoptymalizowana dla buforowania offline przez ESP32
 // ====================================================================
 
-// --- KONFIGURACJA ---
-const HP_USER = "wiki14024@gmail.com";
-const HP_PASS = "Wilku666"; // Twoje hasło do portalu Hypon
-
 function doGet(e) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getActiveSheet();
@@ -23,14 +19,11 @@ function doGet(e) {
   const reqTime = (e && e.parameter && e.parameter.time) || null;
   const pvActive = (e && e.parameter && e.parameter.pv_active) || "1";
   
-  // Decyzja: Czy pobieramy dane z falownika?
-  // ESP przysyła "0" jeśli w momencie pomiaru nie miało WiFi
   let pvEnergy = 0;
   if (pvActive === "1") {
     pvEnergy = pobierzProdukcje();
   }
   
-  // Decyzja: Data. ESP jest SZEFEM - jeśli przysyła datę, używamy jej.
   let formattedDate = reqTime;
   if (!formattedDate) {
     const now = new Date();
@@ -55,6 +48,16 @@ function doGet(e) {
 }
 
 function pobierzProdukcje() {
+  // Pobieramy dane logowania z bezpiecznego magazynu
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const HP_USER = scriptProperties.getProperty('HP_USER');
+  const HP_PASS = scriptProperties.getProperty('HP_PASS');
+  
+  if (!HP_USER || !HP_PASS) {
+    console.error("Brak skonfigurowanych właściwości HP_USER lub HP_PASS");
+    return 0;
+  }
+
   const domain = "https://www.hyponportal.com";
   try {
     const loginUrl = domain + "/signin";
@@ -67,11 +70,16 @@ function pobierzProdukcje() {
     };
 
     const loginResp = UrlFetchApp.fetch(loginUrl, {
-      "method": "post", "headers": { ...commonHeaders, "Referer": domain + "/signin" },
-      "payload": JSON.stringify(loginPayload), "muteHttpExceptions": true
+      "method": "post", 
+      "headers": { ...commonHeaders, "Referer": domain + "/signin" },
+      "payload": JSON.stringify(loginPayload), 
+      "muteHttpExceptions": true
     });
     
-    if (loginResp.getResponseCode() !== 200) return 0;
+    if (loginResp.getResponseCode() !== 200) {
+      console.error(`Błąd logowania: ${loginResp.getResponseCode()}`);
+      return 0;
+    }
 
     const allHeaders = loginResp.getAllHeaders();
     let cookieHeader = "";
@@ -90,10 +98,15 @@ function pobierzProdukcje() {
     const json = JSON.parse(resp.getContentText());
     if (json.data && json.data.infos && json.data.infos.length > 0) {
       const stacja = json.data.infos[0];
-      if (stacja.stationRealtimeVO) return stacja.stationRealtimeVO.eToday; 
+      if (stacja.stationRealtimeVO) {
+        return stacja.stationRealtimeVO.eToday; 
+      }
     }
     return 0;
-  } catch (err) { return 0; }
+  } catch (err) {
+    console.error(`Wyjątek w pobierzProdukcje: ${err.toString()}`);
+    return 0;
+  }
 }
 
 function testujSkrypt() {

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MSAG v1.17 | Wiktor Nycek</title>
+    <title>MSAG v1.16 | Wiktor Nycek</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
@@ -57,6 +57,7 @@
 
         .card { background: var(--card-bg); backdrop-filter: blur(10px); border: 1px solid var(--border); border-radius: 24px; padding: 24px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
         
+        /* DIAGRAM */
         .diagram-card { overflow: visible; display: flex; flex-direction: column; align-items: center; }
         .flow-svg { width: 100%; height: auto; max-width: 600px; }
         .node-label { font-size: 10px; fill: var(--text-dim); font-weight: 600; text-transform: uppercase; }
@@ -103,7 +104,6 @@
 
         footer { margin-top: 40px; padding-bottom: 20px; font-size: 0.75rem; color: var(--text-dim); width: 100%; max-width: 1000px; display: flex; justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 10px; }
         .author-tag { background: rgba(59, 130, 246, 0.1); color: var(--accent-blue); padding: 4px 10px; border-radius: 6px; font-weight: 700; letter-spacing: 0.5px; border: 1px solid rgba(59, 130, 246, 0.2); }
-        .heater-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
     </style>
 </head>
 <body>
@@ -198,7 +198,6 @@
 
     <script>
         let google_script_url = "";
-        let cloudDataCache = [];
 
         function switchTab(tabId) {
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -207,50 +206,29 @@
             document.getElementById('tab-' + tabId).classList.add('active');
         }
 
-        let data = { 
-            grid_p: 0, heater_pwm: 0, heater_active: false, ssr_v: 0, 
-            phases: [{v:0, a:0, p:0}, {v:0, a:0, p:0}, {v:0, a:0, p:0}], 
-            dips: { 1: false, 2: false, 3: false, 4: false }, 
-            mode: 'auto', uptime: '00:00:00', sys_color: 'blue', clock: '--', 
-            cpu_temp: 0, cloud_url: ''
-        };
+        let data = { grid_p: 0, heater_pwm: 0, heater_active: false, ssr_v: 0, phases: [{v:0, a:0, p:0}, {v:0, a:0, p:0}, {v:0, a:0, p:0}], dips: { 1: false, 2: false, 3: false, 4: false }, mode: 'auto', uptime: '00:00:00', sys_color: 'blue', clock: '--', grid_hz: 0, cpu_temp: 0 };
         let websocket;
         let frontendLiveChart = null;
 
         function initWebSocket() {
             websocket = new WebSocket(`ws://${window.location.hostname}/ws`);
-            websocket.onopen = () => { 
-                document.getElementById('conn-indicator').classList.add('online'); 
-                document.getElementById('conn-text').innerText = 'ONLINE'; 
-            };
-            websocket.onclose = () => { 
-                document.getElementById('conn-indicator').classList.remove('online'); 
-                document.getElementById('conn-text').innerText = 'OFFLINE'; 
-                setTimeout(initWebSocket, 2000); 
-            };
+            websocket.onopen = () => { document.getElementById('conn-indicator').classList.add('online'); document.getElementById('conn-text').innerText = 'ONLINE'; };
+            websocket.onclose = () => { document.getElementById('conn-indicator').classList.remove('online'); document.getElementById('conn-text').innerText = 'OFFLINE'; setTimeout(initWebSocket, 2000); };
             websocket.onmessage = (event) => { 
-                try {
-                    const newData = JSON.parse(event.data);
-                    Object.assign(data, newData);
-                    if (newData.cloud_url) google_script_url = newData.cloud_url;
-                    updateUI(); 
-                } catch(e) {
-                    console.error("Błąd parsowania WebSocket:", e);
-                }
+                Object.assign(data, JSON.parse(event.data)); 
+                updateUI(); 
             };
         }
-        
-        function sendCommand(cmd) { 
-            if (websocket && websocket.readyState === WebSocket.OPEN) {
-                websocket.send(JSON.stringify(cmd)); 
-            }
-        }
+        function sendCommand(cmd) { if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(JSON.stringify(cmd)); }
 
+        // ========================================================
+        // NOWY ALGORYTM WYKRESU LIVE
+        // ========================================================
         function renderLiveChart(points) {
-            if (!points || points.length === 0) return;
-            
+            // Obracamy tablicę o 180 stopni - tak aby najnowsze (Teraz) było po LEWEJ stronie wykresu.
             const chartData = points.slice().reverse(); 
             
+            // Generujemy etykiety osi X (0 to Teraz, 6 to -30s, itd.)
             const labels = Array.from({length: 60}, (_, i) => {
                 let seconds = i * 5;
                 if (seconds === 0) return "Teraz";
@@ -271,12 +249,13 @@
                             label: 'Balans Mocy (W)',
                             data: chartData,
                             segment: {
+                                // Zielony dla eksportu (wartości < 0), Czerwony dla poboru (wartości > 0)
                                 borderColor: ctx => ctx.p0.parsed.y < 0 ? '#10b981' : '#ef4444'
                             },
                             fill: {
                                 target: 'origin',
-                                above: 'rgba(239, 68, 68, 0.25)',
-                                below: 'rgba(16, 185, 129, 0.25)'
+                                above: 'rgba(239, 68, 68, 0.25)', // Import (Czerwone Tło)
+                                below: 'rgba(16, 185, 129, 0.25)' // Eksport (Zielone Tło)
                             },
                             tension: 0.4,
                             pointRadius: 0
@@ -289,6 +268,7 @@
                         scales: { 
                             y: { 
                                 grid: { 
+                                    // Linia zerowa jest pogrubiona i rozjaśniona dla czytelności
                                     color: (ctx) => ctx.tick.value === 0 ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,0.05)',
                                     lineWidth: (ctx) => ctx.tick.value === 0 ? 2 : 1
                                 }, 
@@ -298,6 +278,7 @@
                                 ticks: { 
                                     color: '#94a3b8',
                                     maxRotation: 0,
+                                    // Etykieta wyświetla się tylko co 6 element (6 * 5s = 30 sekund)
                                     callback: function(val, index) {
                                         return index % 6 === 0 ? this.getLabelForValue(val) : '';
                                     }
@@ -316,38 +297,28 @@
 
         function updateUI() {
             if (data.fw_version) document.getElementById('fw-version').innerText = data.fw_version;
+            if (data.cloud_url) google_script_url = data.cloud_url;
             
+            // Zegar aktualizuje się co sekundę, wykres tylko jak ma pakiet live_data
             if (data.live_data) renderLiveChart(data.live_data);
 
-            document.getElementById('clock').innerText = data.clock || '--:--:--';
-            document.getElementById('cpu-temp').innerText = (data.cpu_temp || 0).toFixed(1);
-            document.getElementById('val-heater').textContent = (data.heater_pwm || 0) + "%";
-            document.getElementById('slider-val').innerText = (data.heater_pwm || 0) + "%";
-            document.getElementById('uptime').innerText = data.uptime || '--:--:--';
+            document.getElementById('clock').innerText = data.clock;
+            document.getElementById('cpu-temp').innerText = data.cpu_temp.toFixed(1);
+            document.getElementById('val-heater').textContent = data.heater_pwm + "%";
+            document.getElementById('slider-val').innerText = data.heater_pwm + "%";
+            document.getElementById('uptime').innerText = data.uptime;
             
             const valTotal = document.getElementById('val-total');
-            if (data.grid_p > 0) { 
-                valTotal.textContent = "POBÓR " + data.grid_p + "W"; 
-                valTotal.style.fill = "var(--accent-red)"; 
-            } else if (data.grid_p < 0) { 
-                valTotal.textContent = "EXPORT " + Math.abs(data.grid_p) + "W"; 
-                valTotal.style.fill = "var(--accent-green)"; 
-            } else { 
-                valTotal.textContent = "BALANS 0W"; 
-                valTotal.style.fill = "var(--accent-blue)"; 
-            }
+            if (data.grid_p > 0) { valTotal.textContent = "POBÓR " + data.grid_p + "W"; valTotal.style.fill = "var(--accent-red)"; } 
+            else if (data.grid_p < 0) { valTotal.textContent = "EXPORT " + Math.abs(data.grid_p) + "W"; valTotal.style.fill = "var(--accent-green)"; } 
+            else { valTotal.textContent = "BALANS 0W"; valTotal.style.fill = "var(--accent-blue)"; }
 
             document.getElementById('stat-export-w').innerText = (data.grid_p < 0 ? Math.abs(data.grid_p) : 0) + " W";
             document.getElementById('stat-import-w').innerText = (data.grid_p > 0 ? data.grid_p : 0) + " W";
 
             const ledH = document.getElementById('heater-status-led');
-            if (data.heater_active) { 
-                ledH.style.fill = "var(--accent-green)"; 
-                document.getElementById('heater-node').classList.add('heater-active-anim'); 
-            } else { 
-                ledH.style.fill = "var(--accent-red)"; 
-                document.getElementById('heater-node').classList.remove('heater-active-anim'); 
-            }
+            if (data.heater_active) { ledH.style.fill = "var(--accent-green)"; document.getElementById('heater-node').classList.add('heater-active-anim'); } 
+            else { ledH.style.fill = "var(--accent-red)"; document.getElementById('heater-node').classList.remove('heater-active-anim'); }
 
             const fGrid = document.getElementById('flow-grid'); 
             const fPv = document.getElementById('flow-pv'); 
@@ -375,62 +346,26 @@
                 fHeater.style.opacity = "0"; 
             }
 
-            const colorMap = { red: '#ef4444', green: '#10b981', blue: '#3b82f6', orange: '#f59e0b' };
-            document.getElementById('led-rgb').style.background = colorMap[data.sys_color] || '#3b82f6';
-            
-            let dipSum = 0; 
-            [4, 2, 1, 0.5].forEach((w, i) => { 
-                const dipId = 'dip' + (i+1);
-                if(data.dips && data.dips[(i+1).toString()]) { 
-                    document.getElementById(dipId).classList.add('on'); 
-                    dipSum += w; 
-                } else {
-                    document.getElementById(dipId).classList.remove('on'); 
-                }
-            });
+            document.getElementById('led-rgb').style.background = `var(--accent-${data.sys_color})`;
+            let dipSum = 0; [4, 2, 1, 0.5].forEach((w, i) => { if(data.dips[(i+1).toString()]) { document.getElementById('dip'+(i+1)).classList.add('on'); dipSum += w; } else document.getElementById('dip'+(i+1)).classList.remove('on'); });
             document.getElementById('dip-power-val').innerText = dipSum.toFixed(1) + " kW";
 
-            if (data.phases) {
-                data.phases.forEach((p, i) => { 
-                    const elV = document.getElementById(`l${i+1}-v`);
-                    const elA = document.getElementById(`l${i+1}-a`);
-                    const elW = document.getElementById(`l${i+1}-w`);
-                    if (elV) elV.innerText = (p.v || 0).toFixed(1) + ' V';
-                    if (elA) elA.innerText = (p.a || 0).toFixed(2) + ' A';
-                    if (elW) elW.innerText = (p.p || 0) + ' W';
-                });
-            }
+            data.phases.forEach((p, i) => { document.getElementById(`l${i+1}-v`).innerText = p.v.toFixed(1); document.getElementById(`l${i+1}-a`).innerText = p.a.toFixed(2); document.getElementById(`l${i+1}-w`).innerText = p.p; });
 
             const slider = document.getElementById('heater-slider');
-            if (data.mode === 'auto') { 
-                document.getElementById('btn-auto').classList.add('active'); 
-                document.getElementById('btn-man').classList.remove('active'); 
-                slider.disabled = true; 
-                document.getElementById('mode-badge').innerHTML = '<span class="badge badge-auto">Auto</span>'; 
-            } else { 
-                document.getElementById('btn-man').classList.add('active'); 
-                document.getElementById('btn-auto').classList.remove('active'); 
-                slider.disabled = false; 
-                document.getElementById('mode-badge').innerHTML = '<span class="badge badge-manual">Manual</span>'; 
-            }
-            if (document.activeElement !== slider) slider.value = data.heater_pwm || 0;
+            if (data.mode === 'auto') { document.getElementById('btn-auto').classList.add('active'); document.getElementById('btn-man').classList.remove('active'); slider.disabled = true; document.getElementById('mode-badge').innerText = "Auto"; } 
+            else { document.getElementById('btn-man').classList.add('active'); document.getElementById('btn-auto').classList.remove('active'); slider.disabled = false; document.getElementById('mode-badge').innerText = "Manual"; }
+            if (document.activeElement !== slider) slider.value = data.heater_pwm;
         }
 
         document.getElementById('btn-auto').onclick = () => sendCommand({mode: 'auto'});
         document.getElementById('btn-man').onclick = () => sendCommand({mode: 'manual'});
-        document.getElementById('heater-slider').oninput = (e) => { 
-            document.getElementById('slider-val').innerText = e.target.value + "%"; 
-            sendCommand({pwm: parseInt(e.target.value)}); 
-        };
-        document.getElementById('btn-reboot').onclick = () => { 
-            if(confirm("Restart MSAG?")) sendCommand({cmd: 'reboot'}); 
-        };
-        document.getElementById('btn-reset-kwh').onclick = () => { 
-            if(confirm("Skasować liczniki energii?")) sendCommand({cmd: 'reset_kwh'}); 
-        };
+        document.getElementById('heater-slider').oninput = (e) => { document.getElementById('slider-val').innerText = e.target.value + "%"; sendCommand({pwm: parseInt(e.target.value)}); };
+        document.getElementById('btn-reboot').onclick = () => { if(confirm("Restart MSAG?")) sendCommand({cmd: 'reboot'}); };
+        document.getElementById('btn-reset-kwh').onclick = () => { if(confirm("Skasować liczniki?")) sendCommand({cmd: 'reset_kwh'}); };
 
         // ========================================================
-        // LOGIKA WYKRESÓW Z GOOGLE (POPRAWIONA - ISO DATY + NAGŁÓWKI)
+        // LOGIKA WYKRESÓW Z GOOGLE
         // ========================================================
         let cloudChart = null;
         let parsedData = [];
@@ -438,37 +373,20 @@
 
         function parseCustomDate(val) {
             let str = String(val);
-            
-            // Format 1: "2025-11-10T23:00:00.000Z" (ISO)
-            if (str.includes('T') && str.includes('Z')) {
-                let d = new Date(str);
-                if (!isNaN(d.getTime())) {
-                    let h = d.getHours();
-                    let m = d.getMinutes();
-                    if (h === 23 && m >= 50) h = 24;
-                    return { 
-                        day: d.getDate(), 
-                        month: d.getMonth() + 1, 
-                        year: d.getFullYear(), 
-                        hour: h 
-                    };
-                }
-            }
-            
-            // Format 2: "dd.MM.yyyy HH:mm" (stary format)
             let match = str.match(/(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})/);
             if (match) {
                 let h = parseInt(match[4], 10);
                 let m = parseInt(match[5], 10);
-                if (h === 23 && m >= 50) h = 24;
-                return { 
-                    day: parseInt(match[1], 10), 
-                    month: parseInt(match[2], 10), 
-                    year: parseInt(match[3], 10), 
-                    hour: h 
-                };
+                if (h === 23 && m >= 50) h = 24; 
+                return { day: parseInt(match[1], 10), month: parseInt(match[2], 10), year: parseInt(match[3], 10), hour: h };
             }
-            
+            let d = new Date(val);
+            if (!isNaN(d.getTime())) {
+                let h = d.getHours();
+                let m = d.getMinutes();
+                if (h === 23 && m >= 50) h = 24;
+                return { day: d.getDate(), month: d.getMonth() + 1, year: d.getFullYear(), hour: h };
+            }
             return null;
         }
 
@@ -478,47 +396,30 @@
                 return;
             }
             const btn = document.getElementById('btn-fetch-cloud');
-            const statusEl = document.getElementById('cloud-status');
-            btn.disabled = true; 
-            btn.innerText = "⏳ Pobieranie...";
-            statusEl.innerText = "Łączę z Google Sheets...";
-            
+            btn.disabled = true; btn.innerText = "⏳...";
             try {
                 const response = await fetch(google_script_url + "?action=get_data");
                 const rawData = await response.json();
-                
                 parsedData = [];
                 
-                // Pomiń pierwszy wiersz (indeks 0) - to nagłówki!
-                for (let i = 1; i < rawData.length; i++) {
-                    let row = rawData[i];
+                rawData.forEach(row => {
                     let d = parseCustomDate(row[0]);
-                    
                     if(d) {
-                        let e = row[1], i_val = row[2], p = row[3];
+                        let e = row[1], i = row[2], p = row[3];
                         parsedData.push({ 
                             ...d, 
                             exp: (e === "" || e == null) ? null : parseFloat(e), 
-                            imp: (i_val === "" || i_val == null) ? null : parseFloat(i_val), 
+                            imp: (i === "" || i == null) ? null : parseFloat(i), 
                             pv:  (p === "" || p == null) ? null : parseFloat(p) 
                         });
                     }
-                }
+                });
                 
-                if (parsedData.length === 0) {
-                    statusEl.innerText = "⚠️ Brak danych do wyświetlenia.";
-                } else {
-                    populateYears();
-                    renderLogic();
-                    statusEl.innerText = `✅ Pobrano ${parsedData.length} wpisów.`;
-                }
-            } catch (error) { 
-                statusEl.innerText = "❌ Błąd: " + error.message; 
-            }
-            finally { 
-                btn.disabled = false; 
-                btn.innerText = "☁️ Pobierz z Chmury"; 
-            }
+                populateYears();
+                renderLogic();
+                document.getElementById('cloud-status').innerText = `Pobrano ${parsedData.length} wpisów z dysku.`;
+            } catch (error) { document.getElementById('cloud-status').innerText = "Błąd: " + error.message; }
+            finally { btn.disabled = false; btn.innerText = "☁️ Odśwież"; }
         }
 
         function populateYears() {
@@ -549,14 +450,11 @@
         }
 
         function fillSelect(id, items, def) {
-            const el = document.getElementById(id); 
-            el.innerHTML = `<option value="">${def}</option>`;
+            const el = document.getElementById(id); el.innerHTML = `<option value="">${def}</option>`;
             items.forEach(v => { el.innerHTML += `<option value="${v}">${v}</option>`; });
         }
-        
         function fillSelectObjects(id, items, def) {
-            const el = document.getElementById(id); 
-            el.innerHTML = `<option value="">${def}</option>`;
+            const el = document.getElementById(id); el.innerHTML = `<option value="">${def}</option>`;
             items.forEach(o => { el.innerHTML += `<option value="${o.val}">${o.text}</option>`; });
         }
 
@@ -588,16 +486,10 @@
             for (let k in dailyMaxes) {
                 let y = k.split('-')[0];
                 if (!yearly[y]) yearly[y] = { exp: 0, imp: 0, pv: 0 };
-                yearly[y].exp += dailyMaxes[k].exp; 
-                yearly[y].imp += dailyMaxes[k].imp; 
-                yearly[y].pv += dailyMaxes[k].pv;
+                yearly[y].exp += dailyMaxes[k].exp; yearly[y].imp += dailyMaxes[k].imp; yearly[y].pv += dailyMaxes[k].pv;
             }
             let labels = Object.keys(yearly).sort();
-            drawChart('Produkcja Roczna [kWh]', labels, 
-                labels.map(l=>yearly[l].exp), 
-                labels.map(l=>yearly[l].imp), 
-                labels.map(l=>yearly[l].pv), 
-                labels.map(l=>Math.max(0, yearly[l].pv-yearly[l].exp)));
+            drawChart('Produkcja Roczna', labels, labels.map(l=>yearly[l].exp), labels.map(l=>yearly[l].imp), labels.map(l=>yearly[l].pv), labels.map(l=>Math.max(0, yearly[l].pv-yearly[l].exp)));
         }
 
         function renderMonthlySums(year) {
@@ -606,112 +498,72 @@
             for (let k in dailyMaxes) {
                 let m = parseInt(k.split('-')[0]);
                 if (!monthly[m]) monthly[m] = { exp: 0, imp: 0, pv: 0 };
-                monthly[m].exp += dailyMaxes[k].exp; 
-                monthly[m].imp += dailyMaxes[k].imp; 
-                monthly[m].pv += dailyMaxes[k].pv;
+                monthly[m].exp += dailyMaxes[k].exp; monthly[m].imp += dailyMaxes[k].imp; monthly[m].pv += dailyMaxes[k].pv;
             }
             let labels = Object.keys(monthly).sort((a,b)=>a-b);
-            drawChart(`Rok ${year} [kWh]`, labels.map(m=>monthNames[m]), 
-                labels.map(m=>monthly[m].exp), 
-                labels.map(m=>monthly[m].imp), 
-                labels.map(m=>monthly[m].pv), 
-                labels.map(m=>Math.max(0, monthly[m].pv-monthly[m].exp)));
+            drawChart(`Rok ${year}`, labels.map(m=>monthNames[m]), labels.map(m=>monthly[m].exp), labels.map(m=>monthly[m].imp), labels.map(m=>monthly[m].pv), labels.map(m=>Math.max(0, monthly[m].pv-monthly[m].exp)));
         }
 
         function renderDailySums(year, month) {
             let dailyMaxes = getAggregatedMaxes(parsedData.filter(d => d.year === year && d.month === month), r => r.day);
             let labels = Object.keys(dailyMaxes).sort((a,b)=>a-b);
-            drawChart(`${monthNames[month]} ${year} [kWh]`, labels, 
-                labels.map(d=>dailyMaxes[d].exp), 
-                labels.map(d=>dailyMaxes[d].imp), 
-                labels.map(d=>dailyMaxes[d].pv), 
-                labels.map(d=>Math.max(0, dailyMaxes[d].pv-dailyMaxes[d].exp)));
+            drawChart(`${monthNames[month]} ${year}`, labels, labels.map(d=>dailyMaxes[d].exp), labels.map(d=>dailyMaxes[d].imp), labels.map(d=>dailyMaxes[d].pv), labels.map(d=>Math.max(0, dailyMaxes[d].pv-dailyMaxes[d].exp)));
         }
 
         function renderHourlyDelta(year, month, day) {
             let dayData = parsedData.filter(d => d.year === year && d.month === month && d.day === day);
-            
             let daySlots = new Array(25).fill(null);
             dayData.forEach(row => {
-                if (row.hour <= 24) {
-                    daySlots[row.hour] = row;
-                }
+                if (row.pv !== null || row.exp !== null) daySlots[row.hour] = row;
             });
 
             let labels = [], exp = [], imp = [], pv = [], aut = [];
             let bgExp = [], bgImp = [], bgPv = [], bgAut = [];
 
-            let startHour = 0;
-            for (let h = 0; h <= 24; h++) {
-                if (daySlots[h] !== null) {
-                    startHour = h;
-                    break;
-                }
+            let pExp = 0, pImp = 0, pPv = 0;
+            if (daySlots[0] !== null) {
+                pExp = daySlots[0].exp || 0;
+                pImp = daySlots[0].imp || 0;
+                pPv  = daySlots[0].pv || 0;
             }
-            
-            let pExp = daySlots[startHour]?.exp || 0;
-            let pImp = daySlots[startHour]?.imp || 0;
-            let pPv = daySlots[startHour]?.pv || 0;
-            
-            let lastValidHour = startHour;
+
+            let lastValidHour = 0; 
             let deltas = new Array(25).fill(null);
 
-            for (let h = startHour + 1; h <= 24; h++) {
+            for (let h = 1; h <= 24; h++) {
                 let slot = daySlots[h];
                 if (slot !== null) {
                     let gap = h - lastValidHour;
-                    let curExp = slot.exp || 0; 
-                    let curImp = slot.imp || 0; 
-                    let curPv = slot.pv || 0;
-                    
-                    let dExp = curExp - pExp; 
-                    let dImp = curImp - pImp; 
-                    let dPv = curPv - pPv;
+                    let curExp = slot.exp || 0; let curImp = slot.imp || 0; let curPv  = slot.pv || 0;
+                    let dExp = curExp - pExp; let dImp = curImp - pImp; let dPv  = curPv - pPv;
 
-                    if (dExp < 0) dExp = curExp; 
-                    if (dImp < 0) dImp = curImp; 
-                    if (dPv < 0) dPv = curPv;
+                    if (dExp < 0) dExp = curExp; if (dImp < 0) dImp = curImp; if (dPv < 0) dPv = curPv;
 
-                    let avgExp = dExp / gap; 
-                    let avgImp = dImp / gap; 
-                    let avgPv = dPv / gap;
+                    let avgExp = dExp / gap; let avgImp = dImp / gap; let avgPv  = dPv / gap;
 
                     for (let k = lastValidHour + 1; k <= h; k++) {
                         deltas[k] = {
-                            exp: avgExp, 
-                            imp: avgImp, 
-                            pv: avgPv, 
-                            aut: Math.max(0, avgPv - avgExp),
-                            isAveraged: (gap > 1)
+                            exp: avgExp, imp: avgImp, pv: avgPv, aut: Math.max(0, avgPv - avgExp),
+                            isAveraged: (gap > 1) 
                         };
                     }
-                    
-                    pExp = curExp; 
-                    pImp = curImp; 
-                    pPv = curPv;
+                    pExp = curExp; pImp = curImp; pPv = curPv;
                     lastValidHour = h;
                 }
             }
 
             for (let h = 1; h <= 24; h++) {
-                if (deltas[h] === null) {
-                    deltas[h] = { exp: 0, imp: 0, pv: 0, aut: 0, isAveraged: false };
-                }
-                
+                if (deltas[h] === null) deltas[h] = { exp: 0, imp: 0, pv: 0, aut: 0, isAveraged: false };
                 labels.push(h === 24 ? "24:00" : h.toString().padStart(2, '0') + ":00");
-                exp.push(deltas[h].exp); 
-                imp.push(deltas[h].imp); 
-                pv.push(deltas[h].pv); 
-                aut.push(deltas[h].aut);
+                exp.push(deltas[h].exp); imp.push(deltas[h].imp); pv.push(deltas[h].pv); aut.push(deltas[h].aut);
 
-                let alpha = deltas[h].isAveraged ? '0.4' : '0.9';
+                let alpha = deltas[h].isAveraged ? '0.3' : '0.9';
                 bgPv.push(`rgba(245, 158, 11, ${alpha})`);
                 bgAut.push(`rgba(139, 92, 246, ${alpha})`);
                 bgExp.push(`rgba(16, 185, 129, ${alpha})`);
                 bgImp.push(`rgba(239, 68, 68, ${alpha})`);
             }
-            
-            drawChart(`Wykres Godzinowy: ${day}.${month}.${year} [kWh]`, labels, exp, imp, pv, aut, bgExp, bgImp, bgPv, bgAut);
+            drawChart(`Wykres Godzinowy: ${day}.${month}.${year}`, labels, exp, imp, pv, aut, bgExp, bgImp, bgPv, bgAut);
         }
 
         function drawChart(title, labels, exp, imp, pv, aut, cExp, cImp, cPv, cAut) {
@@ -728,28 +580,12 @@
                     ]
                 },
                 options: {
-                    responsive: true, 
-                    maintainAspectRatio: false,
-                    plugins: { 
-                        title: { display: true, text: title, color: '#fff' },
-                        tooltip: { mode: 'index', intersect: false }
-                    },
-                    scales: { 
-                        y: { 
-                            beginAtZero: true, 
-                            grid: { color: 'rgba(255,255,255,0.05)' }, 
-                            ticks: { color: '#94a3b8' },
-                            title: { display: true, text: 'kWh', color: '#94a3b8' }
-                        }, 
-                        x: { 
-                            ticks: { color: '#94a3b8' },
-                            grid: { display: false }
-                        } 
-                    }
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { title: { display: true, text: title, color: '#fff' } },
+                    scales: { y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8' } }, x: { ticks: { color: '#94a3b8' } } }
                 }
             });
         }
-        
         window.onload = initWebSocket;
     </script>
 </body>
