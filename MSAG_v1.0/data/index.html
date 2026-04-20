@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MSAG v1.17 | Wiktor Nycek</title>
+    <title>MSAG v1.18 | Wiktor Nycek</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
@@ -247,9 +247,10 @@
         }
 
         function renderLiveChart(points) {
-            if (!points || points.length === 0) return;
-            
-            const chartData = points.slice().reverse(); 
+            if (!points || !Array.isArray(points) || points.length === 0) return;
+            // Odfiltruj NaN i nieskończoności
+            const validPoints = points.map(p => (typeof p === 'number' && isFinite(p)) ? p : 0);
+            const chartData = validPoints.slice().reverse(); 
             
             const labels = Array.from({length: 60}, (_, i) => {
                 let seconds = i * 5;
@@ -325,20 +326,22 @@
             document.getElementById('slider-val').innerText = (data.heater_pwm || 0) + "%";
             document.getElementById('uptime').innerText = data.uptime || '--:--:--';
             
+            // Zabezpieczenie grid_p przed undefined/NaN
+            const gridPower = (typeof data.grid_p === 'number' && isFinite(data.grid_p)) ? data.grid_p : 0;
             const valTotal = document.getElementById('val-total');
-            if (data.grid_p > 0) { 
-                valTotal.textContent = "POBÓR " + data.grid_p + "W"; 
+            if (gridPower > 0) { 
+                valTotal.textContent = "POBÓR " + gridPower + "W"; 
                 valTotal.style.fill = "var(--accent-red)"; 
-            } else if (data.grid_p < 0) { 
-                valTotal.textContent = "EXPORT " + Math.abs(data.grid_p) + "W"; 
+            } else if (gridPower < 0) { 
+                valTotal.textContent = "EXPORT " + Math.abs(gridPower) + "W"; 
                 valTotal.style.fill = "var(--accent-green)"; 
             } else { 
                 valTotal.textContent = "BALANS 0W"; 
                 valTotal.style.fill = "var(--accent-blue)"; 
             }
 
-            document.getElementById('stat-export-w').innerText = (data.grid_p < 0 ? Math.abs(data.grid_p) : 0) + " W";
-            document.getElementById('stat-import-w').innerText = (data.grid_p > 0 ? data.grid_p : 0) + " W";
+            document.getElementById('stat-export-w').innerText = (gridPower < 0 ? Math.abs(gridPower) : 0) + " W";
+            document.getElementById('stat-import-w').innerText = (gridPower > 0 ? gridPower : 0) + " W";
 
             const ledH = document.getElementById('heater-status-led');
             if (data.heater_active) { 
@@ -353,15 +356,15 @@
             const fPv = document.getElementById('flow-pv'); 
             const fHeater = document.getElementById('flow-heater');
             
-            if (Math.abs(data.grid_p) > 10) { 
+            if (Math.abs(gridPower) > 10) { 
                 fGrid.style.opacity = "1"; 
-                fGrid.style.stroke = data.grid_p < 0 ? "var(--accent-green)" : "var(--accent-red)"; 
-                data.grid_p < 0 ? fGrid.classList.add('flow-reverse') : fGrid.classList.remove('flow-reverse'); 
+                fGrid.style.stroke = gridPower < 0 ? "var(--accent-green)" : "var(--accent-red)"; 
+                gridPower < 0 ? fGrid.classList.add('flow-reverse') : fGrid.classList.remove('flow-reverse'); 
             } else { 
                 fGrid.style.opacity = "0"; 
             }
             
-            if (data.grid_p < -50 || data.heater_active) { 
+            if (gridPower < -50 || data.heater_active) { 
                 fPv.style.opacity = "1"; 
                 fPv.style.stroke = "var(--accent-green)"; 
             } else { 

@@ -8,6 +8,10 @@
  *   - Fix: timeout HTTP skrócony do 5s
  *   - Optymalizacja: loop() używa danych z ControlTask zamiast ponownych odczytów
  *   - Fix: rozmiar bufora w formatTimestamp (20→32)
+ *   - Nowe: inicjalizacja live_history
+ *   - Nowe: większy bufor JSON (4096)
+ *   - Nowe: fallback mocy całkowitej z sumy faz
+ *   - Nowe: dioda RGB pokazuje eksport/import/autokonsumpcję po stabilnym WiFi
  * ==================================================================== */
 
 #include <WiFi.h>
@@ -70,6 +74,10 @@ unsigned long wifi_state_timer = 0;
 unsigned long last_reconnect_attempt = 0;
 bool ap_is_running = false;
 
+// --- STABILNOŚĆ WIFI DLA DIODY ---
+bool wifi_stable = false;
+unsigned long wifi_stable_since = 0;
+
 // --- OBIEKTY I ZMIENNE GLOBALNE ---
 ATM90E32 licznik_atm{};
 AsyncWebServer server(80);
@@ -108,7 +116,7 @@ void ControlTask(void *pvParameters) {
     for(;;) {
         // Bezpieczny odczyt z licznika
         if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            p_total = licznik_atm.GetTotalActivePower();
+            float p_meter = licznik_atm.GetTotalActivePower();
             
             // Odczytujemy też dane fazowe
             float v1 = licznik_atm.GetLineVoltageA();
@@ -125,6 +133,10 @@ void ControlTask(void *pvParameters) {
             float ang3 = licznik_atm.GetPhaseC();
             
             xSemaphoreGive(spiMutex);
+            
+            // Poprawiony odczyt mocy całkowitej: suma faz jako fallback
+            float p_sum = p1 + p2 + p3;
+            p_total = (fabs(p_meter) > fabs(p_sum)) ? p_meter : p_sum;
             
             // Aktualizacja globalnych zmiennych z ochroną mutexem
             if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
@@ -144,6 +156,9 @@ void ControlTask(void *pvParameters) {
                 tryb_awaryjny = true;
                 awaryjny_timer = millis();
                 Serial.println("[ALARM] Wykryto brak napięcia SSR! Tryb awaryjny.");
+                // Reset stabilności WiFi przy awarii
+                wifi_stable = false;
+                wifi_stable_since = 0;
             }
         }
         else if (tryb_awaryjny) {
@@ -169,7 +184,7 @@ void ControlTask(void *pvParameters) {
 String formatTimestamp(uint32_t timestamp) {
   if (timestamp < 100000) return "Brak danych";
   time_t t = timestamp; struct tm *tm_info = localtime(&t);
-  char buf[32]; strftime(buf, sizeof(buf), "%d.%m.%Y %H:%M", tm_info);  // FIX: 20→32
+  char buf[32]; strftime(buf, sizeof(buf), "%d.%m.%Y %H:%M", tm_info);
   return String(buf);
 }
 
@@ -189,31 +204,69 @@ void obliczMocGrzalki() {
   if (p_max_heater == 0) p_max_heater = 1000.0;
 }
 
-// --- SYSTEM SYGNALIZACJI LED ---
+// --- SYSTEM SYGNALIZACJI LED (NOWA LOGIKA Z ENERGETYCZNYM MIGANIEM) ---
 void aktualizujStanIKolory() {
-    if (wifi_state == WIFI_CONNECTING) {
-        if ((millis() % 500) < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 128, 128)); 
+    // Priorytet 1: tryb awaryjny (czerwone szybkie mignięcia? Używamy starego wzorca)
+    if (tryb_awaryjny) {
+        if (millis() % 500 < 250) rgb_led.setPixelColor(0, rgb_led.Color(255, 0, 0));
         else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
+        rgb_led.show();
+        return;
     }
-    else if (wifi_state == WIFI_AP_MODE) {
-        if ((millis() % 500) < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 255));
-        else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
-    }
-    else { 
-        if (tryb_awaryjny) {
-            if (millis() % 500 < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
-            else rgb_led.setPixelColor(0, rgb_led.Color(255, 0, 0)); 
-        } else {
-            if (ema_p_total > 100) rgb_led.setPixelColor(0, rgb_led.Color(255, 0, 0)); 
-            else if (ema_p_total < -100) rgb_led.setPixelColor(0, rgb_led.Color(0, 255, 0)); 
-            else if (aktualne_pwm > 102 && tryb_auto) rgb_led.setPixelColor(0, rgb_led.Color(255, 100, 0)); 
-            else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 255)); 
+    
+    // Priorytet 2: jeśli WiFi nie jest stabilne (łączymy się lub AP) – stara logika
+    if (!wifi_stable) {
+        if (wifi_state == WIFI_CONNECTING) {
+            if ((millis() % 500) < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 128, 128)); 
+            else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
         }
+        else if (wifi_state == WIFI_AP_MODE) {
+            if ((millis() % 500) < 250) rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 255));
+            else rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
+        }
+        else { // WIFI_CONNECTED ale jeszcze nie stabilne – np. świeci na niebiesko
+            rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 255));
+        }
+        rgb_led.show();
+        return;
+    }
+    
+    // Priorytet 3: stabilne WiFi -> pokazujemy stan energetyczny (miganie)
+    const float THRESHOLD = 50.0; // Waty
+    bool heater_on = (aktualne_pwm > 0);
+    int color_r = 0, color_g = 0, color_b = 0;
+    
+    if (p_total > THRESHOLD) {
+        // IMPORT (pobór) – czerwony
+        color_r = 255; color_g = 0; color_b = 0;
+    } 
+    else if (p_total < -THRESHOLD) {
+        // EKSPORT (oddawanie) – zielony
+        color_r = 0; color_g = 255; color_b = 0;
+    }
+    else if (heater_on && fabs(p_total) <= THRESHOLD) {
+        // AUTOKONSUMPCJA – pomarańczowy (255,100,0)
+        color_r = 255; color_g = 100; color_b = 0;
+    }
+    else {
+        // Stan neutralny – niebieski (ciągły, bez migania)
+        rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 255));
+        rgb_led.show();
+        return;
+    }
+    
+    // Miganie: cykl 5s: 0-0.5s ON, 0.5-2.5s OFF, 2.5-3.0s ON, 3.0-5.0s OFF
+    unsigned long ms = millis() % 5000;
+    bool led_on = (ms < 500) || (ms >= 2500 && ms < 3000);
+    if (led_on) {
+        rgb_led.setPixelColor(0, rgb_led.Color(color_r, color_g, color_b));
+    } else {
+        rgb_led.setPixelColor(0, rgb_led.Color(0, 0, 0));
     }
     rgb_led.show();
 }
 
-// --- MASZYNA STANÓW WIFI ---
+// --- MASZYNA STANÓW WIFI (z dodaną stabilnością) ---
 void obslugaWiFi() {
     wm.process(); 
     switch (wifi_state) {
@@ -224,16 +277,27 @@ void obslugaWiFi() {
                 Serial.println("[WIFI] Dostęp: http://msag.local/");
                 if (ap_is_running) { wm.stopConfigPortal(); ap_is_running = false; }
                 wifi_state = WIFI_CONNECTED;
+                // Reset stabilności – zaczynamy odliczanie od nowa
+                wifi_stable = false;
+                wifi_stable_since = millis();
             } else if (millis() - wifi_state_timer > 15000) {
                 Serial.println("[WIFI] Nie udało się połączyć. Start trybu AP...");
                 if (!ap_is_running) { wm.startConfigPortal("MSAG-Konfiguracja"); ap_is_running = true; }
                 wifi_state = WIFI_AP_MODE; last_reconnect_attempt = millis();
+                wifi_stable = false; wifi_stable_since = 0;
             }
             break;
         case WIFI_CONNECTED:
             if (WiFi.status() != WL_CONNECTED) {
                 Serial.println("\n[WIFI] Utrata połączenia! Próba reconnectu...");
                 wifi_state = WIFI_CONNECTING; wifi_state_timer = millis();
+                wifi_stable = false; wifi_stable_since = 0;
+            } else {
+                // Sprawdzenie stabilności
+                if (!wifi_stable && wifi_stable_since > 0 && (millis() - wifi_stable_since >= 30000)) {
+                    wifi_stable = true;
+                    Serial.println("[WIFI] Połączenie stabilne od 30 sekund – dioda przechodzi w tryb energetyczny.");
+                }
             }
             break;
         case WIFI_AP_MODE:
@@ -245,8 +309,12 @@ void obslugaWiFi() {
                 Serial.println("\n[WIFI] Router powrócił! Połączenie odzyskane.");
                 Serial.print("[WIFI] Przydzielony adres IP: "); Serial.println(WiFi.localIP());
                 wm.stopConfigPortal(); ap_is_running = false; wifi_state = WIFI_CONNECTED;
+                wifi_stable = false; wifi_stable_since = millis();
+            } else {
+                wifi_stable = false; wifi_stable_since = 0;
             }
             break;
+        default: break;
     }
 }
 
@@ -276,7 +344,7 @@ void rozladujKolejkeDoGoogle() {
     
     PendingRecord rec = syncQueue[0];
     
-    char timeStr[32];  // FIX: 20→32
+    char timeStr[32];
     time_t t = rec.timestamp; struct tm *ti = localtime(&t);
     strftime(timeStr, sizeof(timeStr), "%d.%m.%Y %H:%M", ti);
     
@@ -292,7 +360,7 @@ void rozladujKolejkeDoGoogle() {
                  "&pv_active=" + String(pv_flag);
                  
     http.begin(client, url); 
-    http.setTimeout(5000);  // FIX: 20000→5000 - nie blokujemy loop() na 20s
+    http.setTimeout(5000);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     
     int httpCode = http.GET();
@@ -309,7 +377,7 @@ void rozladujKolejkeDoGoogle() {
 
 // --- WEBSOCKET ---
 void wyslijDaneWebsocket(bool sendLive) {
-  // Zwiększony rozmiar JSON - 1536 → 2048 dla bezpieczeństwa
+  // Zwiększony rozmiar JSON dla bezpieczeństwa (4096)
   StaticJsonDocument<4096> doc;
   
   doc["grid_p"] = (int)p_total;
@@ -321,21 +389,19 @@ void wyslijDaneWebsocket(bool sendLive) {
   doc["fw_version"] = FW_VERSION; 
   doc["cpu_temp"] = temperatureRead();
   
-  // FIX: Atomowy odczyt double przez mutex
   double exp_copy, imp_copy;
   if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       exp_copy = total_export_kwh;
       imp_copy = total_import_kwh;
       xSemaphoreGive(dataMutex);
   } else {
-      exp_copy = total_export_kwh;  // fallback - może być nieatomowe, ale lepsze niż nic
+      exp_copy = total_export_kwh;
       imp_copy = total_import_kwh;
   }
   doc["export_kwh"] = exp_copy;
   doc["import_kwh"] = imp_copy;
   doc["cloud_url"] = GOOGLE_SCRIPT_URL;
   
-  // Dodajemy dane fazowe (zabezpieczone mutexem)
   JsonArray phases = doc.createNestedArray("phases");
   if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       for(int i = 0; i < 3; i++) {
@@ -347,14 +413,13 @@ void wyslijDaneWebsocket(bool sendLive) {
       xSemaphoreGive(dataMutex);
   }
   
-  // Dodajemy stan DIP switchy
   JsonObject dips = doc.createNestedObject("dips");
   dips["1"] = (digitalRead(PIN_DIP1) == LOW);
   dips["2"] = (digitalRead(PIN_DIP2) == LOW);
   dips["3"] = (digitalRead(PIN_DIP3) == LOW);
   dips["4"] = (digitalRead(PIN_DIP4) == LOW);
   
-  // Określamy kolor systemowy dla LED na stronie
+  // Kolor systemowy dla strony – pozostawiamy bez zmian (nie wpływa na diodę)
   if (tryb_awaryjny) doc["sys_color"] = "red";
   else if (ema_p_total > 100) doc["sys_color"] = "red";
   else if (ema_p_total < -100) doc["sys_color"] = "green";
@@ -373,7 +438,6 @@ void wyslijDaneWebsocket(bool sendLive) {
     for(int i=0; i<60; i++) live.add((int)live_history[i]); 
   }
   
-  // FIX: Sprawdzenie overflow przed wysłaniem
   if (doc.overflowed()) {
       Serial.println("[WS] OSTRZEŻENIE: JSON overflow - dane niekompletne!");
   }
@@ -391,7 +455,7 @@ void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *c, AwsEventType t, void 
     if (doc.containsKey("mode")) tryb_auto = (doc["mode"] == "auto");
     if (doc.containsKey("pwm") && !tryb_auto) {
         int pwm_val = doc["pwm"];
-        pwm_val = constrain(pwm_val, 0, 100);  // FIX: Walidacja zakresu
+        pwm_val = constrain(pwm_val, 0, 100);
         aktualne_pwm = (pwm_val * 1023) / 100;
     }
     if (doc.containsKey("cmd")) { 
@@ -408,7 +472,6 @@ void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *c, AwsEventType t, void 
         ESP.restart(); 
       }
       else if (cmd == "reset_kwh") {
-        // FIX: Atomowa aktualizacja double
         if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             total_export_kwh = 0.0;
             total_import_kwh = 0.0;
@@ -431,7 +494,7 @@ void setup() {
   Serial.println("\n\nSTART SYSTEMU MSAG v1.18 PRO");
   
   spiMutex = xSemaphoreCreateMutex();
-  dataMutex = xSemaphoreCreateMutex();  // NOWY MUTEX
+  dataMutex = xSemaphoreCreateMutex();
   
   rgb_led.begin(); rgb_led.setBrightness(50);
   
@@ -457,6 +520,8 @@ void setup() {
   SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SPI_CS);
   licznik_atm.begin(PIN_SPI_CS, 50, 0, 33308, 17128, 8000, 8000);
   LittleFS.begin(true);
+
+  // Inicjalizacja live_history (poprawka)
   for(int i = 0; i < 60; i++) live_history[i] = 0.0;
 
   WiFi.mode(WIFI_STA); wm.setHostname(HOSTNAME); wm.setConfigPortalBlocking(false);
@@ -485,7 +550,7 @@ void loop() {
 
   if (millis() - last_led_update >= 50) { last_led_update = millis(); aktualizujStanIKolory(); }
 
-  // FIX: Reset rst_start po puszczeniu przycisku
+  // Reset rst_start po puszczeniu przycisku
   static unsigned long rst_start = 0;
   if (digitalRead(PIN_RST_IN) == LOW) {
       if (rst_start == 0) rst_start = millis();
@@ -494,17 +559,16 @@ void loop() {
           ESP.restart(); 
       }
   } else {
-      rst_start = 0;  // FIX: Reset timera po puszczeniu
+      rst_start = 0;
   }
 
   ssr_v = (analogRead(PIN_SSR_SENSE) * 3.3 / 4095.0) * 3.0;
 
-  // --- LOGI SERYJNE 1 HZ (używamy danych z ControlTask) ---
+  // --- LOGI SERYJNE 1 HZ (z dodanym p_total) ---
   static unsigned long last_serial_log = 0;
   if (millis() - last_serial_log >= 1000) {
       last_serial_log = millis();
       
-      // FIX: Używamy danych z ControlTask zamiast ponownego odczytu
       float v1, v2, v3, a1, a2, a3, phi1, phi2, phi3;
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
           v1 = phase_voltage[0]; a1 = phase_current[0]; phi1 = phase_angle[0];
@@ -512,11 +576,12 @@ void loop() {
           v3 = phase_voltage[2]; a3 = phase_current[2]; phi3 = phase_angle[2];
           xSemaphoreGive(dataMutex);
           
-          Serial.printf("LOG [%s] L1:%.1fV %.2fA %.1f° | L2:%.1fV %.2fA %.1f° | L3:%.1fV %.2fA %.1f° | PWM:%d%% | Tryb:%s\n", 
+          Serial.printf("LOG [%s] L1:%.1fV %.2fA %.1f° | L2:%.1fV %.2fA %.1f° | L3:%.1fV %.2fA %.1f° | P_total:%.1fW | PWM:%d%% | Tryb:%s\n", 
               getUptime().c_str(), 
               v1, a1, phi1, 
               v2, a2, phi2, 
-              v3, a3, phi3, 
+              v3, a3, phi3,
+              p_total,
               (aktualne_pwm*100)/1023,
               tryb_awaryjny ? "AWARYJNY" : (tryb_auto ? "AUTO" : "MANUAL"));
       }
@@ -525,7 +590,6 @@ void loop() {
   // OBSŁUGA CZASU, LICZNIKÓW I KOLEJKOWANIA
   if (millis() - last_ws_update >= 1000) { last_ws_update = millis();
     obliczMocGrzalki();
-    // FIX: Zwiększony timeout mutexu (50→200ms)
     double re = 0.0, ri = 0.0;
     if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
         re = licznik_atm.GetExportEnergy(); 
@@ -535,7 +599,6 @@ void loop() {
         Serial.println("[OSTRZEŻENIE] Nie udało się odczytać energii z licznika (mutex timeout)");
     }
     
-    // FIX: Atomowa aktualizacja double
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         if (re > 0) { total_export_kwh += re; today_export_kwh += re; }
         if (ri > 0) { total_import_kwh += ri; today_import_kwh += ri; }
