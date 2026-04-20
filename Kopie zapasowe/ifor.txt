@@ -4,6 +4,8 @@ MSAG_v1.0_15.04.2026_12_09.ino
 Program przed podziałem na TASKi
 MSAG_v1.0_15.04.2026_10_10.ino
 Wersja przed zmianami przed Deepseak
+MSAG_v1.0_20.04.2026_20_55.ino
+Działa pomiar I i V , przed poprawkami strony www
 
 
 MSAG_Connector_15.04.2026.gs
@@ -14,3 +16,5 @@ Wersja przed zmianami przed Deepseak
 
 index_15.04.2026_10_10.html
 Wersja przed zmianami przed Deepseak
+index_20.04.2026_19_55.html
+Działa pomiar I i V , przed poprawkami strony www
