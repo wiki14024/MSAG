@@ -32,10 +32,10 @@ const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwhYfM
 const String FW_VERSION = "v1.18 PRO";
 const char* HOSTNAME = "msag"; 
 
-#define PIN_DIP1 23
-#define PIN_DIP2 22
-#define PIN_DIP3 21
-#define PIN_DIP4 20
+#define PIN_DIP1 20   // Twoja nóżka nr 1 (lewa) -> 4kW
+#define PIN_DIP2 21   // Twoja nóżka nr 2 -> 2kW
+#define PIN_DIP3 22   // Twoja nóżka nr 3 -> 1kW
+#define PIN_DIP4 23   // Twoja nóżka nr 4 (prawa) -> 0.5kW
 #define PIN_LED1 19
 #define PIN_LED2 18
 #define PIN_PWM_OUT 14
@@ -524,7 +524,6 @@ void loop() {
   // OBSŁUGA CZASU, LICZNIKÓW I KOLEJKOWANIA
   if (millis() - last_ws_update >= 1000) { last_ws_update = millis();
     obliczMocGrzalki();
-    
     // FIX: Zwiększony timeout mutexu (50→200ms)
     double re = 0.0, ri = 0.0;
     if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
