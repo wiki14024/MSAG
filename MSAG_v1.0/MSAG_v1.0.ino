@@ -121,9 +121,9 @@ void ControlTask(void *pvParameters) {
             float p1 = licznik_atm.GetActivePowerA();
             float p2 = licznik_atm.GetActivePowerB();
             float p3 = licznik_atm.GetActivePowerC();
-            float ang1 = licznik_atm.GetPhaseA();
-            float ang2 = licznik_atm.GetPhaseB();
-            float ang3 = licznik_atm.GetPhaseC();
+            float ang1 = licznik_atm.GetSignedPhaseA();
+            float ang2 = licznik_atm.GetSignedPhaseB();
+            float ang3 = licznik_atm.GetSignedPhaseC();
             xSemaphoreGive(spiMutex);
             
             float p_sum = p1 + p2 + p3;
@@ -438,7 +438,7 @@ void setup() {
   delay(100);
 
   Serial.println("[INIT] Uruchamiam bibliotekę ATM90E32...");
-  licznik_atm.begin(PIN_SPI_CS, 50, 0, 33308, 17128, 8000, 8000);
+  licznik_atm.begin(PIN_SPI_CS, 50, 0, 33308, 17128, 17016, 17062);
   delay(100);
 
   // UWAGA: Funkcja nadpiszRejestrATM zadeklarowana wyżej po chamsku wymusi zmianę w sprzęcie.
